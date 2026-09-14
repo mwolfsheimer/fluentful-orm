@@ -9,7 +9,7 @@
     "typescript",
     "zod"
   ],
-  "license": "MIT",
+  "license": "Apache-2.0",
   "author": "Marco Wolfsheimer",
   "repository": {
     "type": "git",

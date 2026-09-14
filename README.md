@@ -21,6 +21,10 @@ npm install feather-orm
 
 The package includes its AWS SDK v3 DynamoDB and Zod runtime dependencies. Bring your own configured `DynamoDBClient`, or use the dependency-free in-memory backend in tests and local workflows.
 
+## License and contributions
+
+feather-orm is available under the [Apache License 2.0](LICENSE). Contributions are welcome under the [maintainer-led process](CONTRIBUTING.md) and require a [DCO sign-off](DCO.md). Pull requests are proposals; acceptance, review, merge, and release are not guaranteed.
+
 ## Contents
 
 - [Quick start](#quick-start)
