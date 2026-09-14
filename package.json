@@ -1,6 +1,6 @@
 {
   "name": "feather-orm",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "A typed fluent query builder for AWS SDK v3 DynamoDB.",
   "keywords": [
     "aws",
