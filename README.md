@@ -1,6 +1,6 @@
-# feather-orm
+# @fluentful/orm
 
-`feather-orm` is a fluent wrapper around the AWS SDK v3 DynamoDB client. Its primary `QueryBuilder` API provides:
+`@fluentful/orm` is a fluent wrapper around the AWS SDK v3 DynamoDB client. Its primary `QueryBuilder` API provides:
 
 - schema-aware tables and inferred TypeScript results with Zod
 - create, get, update, delete, query, and scan operations
@@ -16,14 +16,14 @@ New code should normally use the typed API built around `defineTable()`. The low
 ## Install
 
 ```bash
-npm install feather-orm
+npm install @fluentful/orm
 ```
 
 The package includes its AWS SDK v3 DynamoDB and Zod runtime dependencies. Bring your own configured `DynamoDBClient`, or use the dependency-free in-memory backend in tests and local workflows.
 
 ## License and contributions
 
-feather-orm is available under the [Apache License 2.0](LICENSE). Contributions are welcome under the [maintainer-led process](CONTRIBUTING.md) and require a [DCO sign-off](DCO.md). Pull requests are proposals; acceptance, review, merge, and release are not guaranteed.
+@fluentful/orm is available under the [Apache License 2.0](LICENSE). Contributions are welcome under the [maintainer-led process](CONTRIBUTING.md) and require a [DCO sign-off](DCO.md). Pull requests are proposals; acceptance, review, merge, and release are not guaranteed.
 
 ## Contents
 
@@ -52,7 +52,7 @@ feather-orm is available under the [Apache License 2.0](LICENSE). Contributions 
 ```ts
 import {DynamoDBClient} from '@aws-sdk/client-dynamodb';
 import {z} from 'zod';
-import {defineTable} from 'feather-orm';
+import {defineTable} from '@fluentful/orm';
 
 const dynamoDB = new DynamoDBClient({region: 'eu-west-1'});
 
@@ -106,7 +106,7 @@ The schema is used at runtime as well as compile time. Inputs, keys, filter valu
 Applications can inject a dependency-free, process-local backend instead of an AWS client. No server, port, credentials lookup, filesystem storage, or npm dependency is needed. Each instance owns its own tables and records.
 
 ```ts
-import {createInMemoryDynamoDB, defineTable, QueryBuilder} from 'feather-orm';
+import {createInMemoryDynamoDB, defineTable, QueryBuilder} from '@fluentful/orm';
 import {z} from 'zod';
 
 const memory = createInMemoryDynamoDB();
@@ -808,7 +808,7 @@ Batch operations are not atomic and do not support per-item conditions. Use a tr
 `typedTransaction()` composes up to 100 create, update, delete, or condition-check operations across typed tables.
 
 ```ts
-import {typedTransaction} from 'feather-orm';
+import {typedTransaction} from '@fluentful/orm';
 
 await typedTransaction(dynamoDB)
     .clientRequestToken('complete-task:project-1:task-1')
@@ -929,7 +929,7 @@ Use the untyped API when a typed table definition is not practical. It has the s
 
 ```ts
 import {DynamoDBClient} from '@aws-sdk/client-dynamodb';
-import {QueryBuilder} from 'feather-orm';
+import {QueryBuilder} from '@fluentful/orm';
 
 interface Task {
     projectId: string;
@@ -1001,13 +1001,13 @@ const tableNames = await QueryBuilder.listTables(dynamoDB);
 await QueryBuilder.deleteTable('temporary-tasks', dynamoDB);
 ```
 
-`defineTable`, `createTable`, `deleteTable`, `describeTable`, `getTableDefinition`, `listTables`, and `transactWrite` are also named exports from `feather-orm`; each has the same behaviour as its corresponding `QueryBuilder` static helper.
+`defineTable`, `createTable`, `deleteTable`, `describeTable`, `getTableDefinition`, `listTables`, and `transactWrite` are also named exports from `@fluentful/orm`; each has the same behaviour as its corresponding `QueryBuilder` static helper.
 
 The existing `createTable(name, key, client)` shorthand creates an on-demand table with one string partition key. For composite keys, other key types and indexes, use the QueryBuilder-owned definition overload:
 
 ```ts
-import {QueryBuilder} from 'feather-orm';
-import type {DynamoDBTableDefinition} from 'feather-orm';
+import {QueryBuilder} from '@fluentful/orm';
+import type {DynamoDBTableDefinition} from '@fluentful/orm';
 
 const definition: DynamoDBTableDefinition = {
     name: 'tasks',

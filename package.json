@@ -1,6 +1,6 @@
 {
-  "name": "feather-orm",
-  "version": "1.0.0",
+  "name": "@fluentful/orm",
+  "version": "1.0.2",
   "description": "A typed fluent query builder for AWS SDK v3 DynamoDB.",
   "keywords": [
     "aws",
@@ -13,12 +13,12 @@
   "author": "Marco Wolfsheimer",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mwolfsheimer/feather-orm.git"
+    "url": "https://github.com/mwolfsheimer/fluentful-orm.git"
   },
   "bugs": {
-    "url": "https://github.com/mwolfsheimer/feather-orm/issues"
+    "url": "https://github.com/mwolfsheimer/fluentful-orm/issues"
   },
-  "homepage": "https://github.com/mwolfsheimer/feather-orm#readme",
+  "homepage": "https://github.com/mwolfsheimer/fluentful-orm#readme",
   "type": "commonjs",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
