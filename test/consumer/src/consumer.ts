@@ -23,7 +23,7 @@ void engine;
 
 async function verifyBrowserPersistence(): Promise<void> {
   const databaseName = `fluentful-orm-browser-${Date.now()}`;
-  const first = createEngine.indexDB(databaseName);
+  const first = createEngine.browser(databaseName);
   await QueryBuilder.createTable("browser-records", "id", first.db);
   await new QueryBuilder("browser-records", first.db).create({
     id: "record-1",
@@ -31,7 +31,7 @@ async function verifyBrowserPersistence(): Promise<void> {
   }).toPromise();
   await first.close();
 
-  const restored = createEngine.indexDB(databaseName);
+  const restored = createEngine.browser(databaseName);
   const record = await new QueryBuilder("browser-records", restored.db)
     .get({ id: "record-1" })
     .toPromise<{ id: string; bytes: Uint8Array }>();

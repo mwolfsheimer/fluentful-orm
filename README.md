@@ -111,7 +111,7 @@ import {z} from 'zod';
 
 const engine = createEngine.memory();
 // const engine = createEngine.file('./data/fluentful-orm.json');
-// const engine = createEngine.indexDB('my-browser-app');
+// const engine = createEngine.browser('my-browser-app');
 
 try {
     await QueryBuilder.createTable('accounts', 'id', engine.db);
@@ -139,7 +139,7 @@ try {
 
 Pass `engine.db` into application constructors that already accept `DynamoDBClient`, or use it with the lower-level `new QueryBuilder(tableName, engine.db)`. Seed records through normal create/batch APIs. `reset()` clears records and transaction request tokens but retains table definitions. It returns a promise so file and IndexedDB changes are durably written before it resolves. `close()` destroys the client and rejects later requests; file and IndexedDB engines keep their stored snapshot for the next instance. Closing more than once is safe.
 
-Tables must be declared before use. Supply QueryBuilder-owned `DynamoDBTableDefinition` values as the optional second argument to `createEngine.file(path, [definition, ...])`, or to `createEngine.memory([definition, ...])` and `createEngine.indexDB(name, [definition, ...])`, for synchronous initialisation. You can also use `await QueryBuilder.createTable(definition, engine.db)`. Both paths use the same validation and translation, supporting composite keys, attribute types, global/local indexes and optional index projections without AWS request fields. Existing SDK `CreateTableCommandInput` constructor inputs remain supported for compatibility. Typed `defineTable()` describes application validation and does not create storage tables. Index projections support `ALL`, `KEYS_ONLY` and `INCLUDE`; omission preserves the existing `ALL` default.
+Tables must be declared before use. Supply QueryBuilder-owned `DynamoDBTableDefinition` values as the optional second argument to `createEngine.file(path, [definition, ...])`, or to `createEngine.memory([definition, ...])` and `createEngine.browser(name, [definition, ...])`, for synchronous initialisation. You can also use `await QueryBuilder.createTable(definition, engine.db)`. Both paths use the same validation and translation, supporting composite keys, attribute types, global/local indexes and optional index projections without AWS request fields. Existing SDK `CreateTableCommandInput` constructor inputs remain supported for compatibility. Typed `defineTable()` describes application validation and does not create storage tables. Index projections support `ALL`, `KEYS_ONLY` and `INCLUDE`; omission preserves the existing `ALL` default.
 
 Supported QueryBuilder behaviour:
 

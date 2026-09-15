@@ -1058,7 +1058,7 @@ export const createEngine = {
     memory(tables: InitialTables = []): InMemoryDynamoDB {
         return new InMemoryDynamoDB(tables);
     },
-    indexDB(name = 'fluentful-orm', tables: InitialTables = []): InMemoryDynamoDB {
+    browser(name = 'fluentful-orm', tables: InitialTables = []): InMemoryDynamoDB {
         return new InMemoryDynamoDB(tables, new IndexedDBPersistence(name));
     },
     file(path: string, tables: InitialTables = []): InMemoryDynamoDB {

@@ -122,7 +122,7 @@ test('IndexedDB engine restores records and persists reset', async (context) => 
         await deleteIndexedDB(name);
     });
 
-    const first = createEngine.indexDB(name);
+    const first = createEngine.browser(name);
     engines.push(first);
     await QueryBuilder.createTable('records', 'id', first.db);
     await new QueryBuilder('records', first.db).create({
@@ -132,7 +132,7 @@ test('IndexedDB engine restores records and persists reset', async (context) => 
     }).toPromise();
     await first.close();
 
-    const restored = createEngine.indexDB(name);
+    const restored = createEngine.browser(name);
     engines.push(restored);
     assert.deepEqual(
         await new QueryBuilder('records', restored.db).get({id: 'one'}).toPromise(),
@@ -141,7 +141,7 @@ test('IndexedDB engine restores records and persists reset', async (context) => 
     await restored.reset();
     await restored.close();
 
-    const reset = createEngine.indexDB(name);
+    const reset = createEngine.browser(name);
     engines.push(reset);
     assert.equal(await new QueryBuilder('records', reset.db).get({id: 'one'}).toPromise(), null);
 });
