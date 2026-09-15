@@ -19,4 +19,4 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
-      - run: npm run pack:check
+      - run: npm run test:consumer

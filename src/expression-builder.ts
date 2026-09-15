@@ -2,6 +2,8 @@ import {QuerySerializer} from "./query-serializer";
 import {UpdateExpressionType} from "./types";
 import type {GenericDocument, GetSelector} from "./types";
 
+type Buffer = Uint8Array;
+
 /** Expression fields populated on an AWS DynamoDB request input. */
 export interface ExpressionTarget {
     /** Compiled update expression. */

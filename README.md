@@ -16,10 +16,10 @@ New code should normally use the typed API built around `defineTable()`. The low
 ## Install
 
 ```bash
-npm install @fluentful/orm
+npm install @fluentful/orm @aws-sdk/client-dynamodb@^3.1037.0 zod@^4.3.6
 ```
 
-The package includes its AWS SDK v3 DynamoDB and Zod runtime dependencies. Bring your own configured `DynamoDBClient`, or use the dependency-free in-memory backend in tests and local workflows.
+Supported environments are Node.js 18 or later and TypeScript 6. Install the required peer dependencies alongside the package: `@aws-sdk/client-dynamodb` ^3.1037.0 and `zod` ^4.3.6. Bring your own configured `DynamoDBClient`, or use the dependency-free in-memory backend in tests and local workflows.
 
 ## License and contributions
 

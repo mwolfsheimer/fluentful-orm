@@ -5,6 +5,7 @@ import type {BatchOptions, ConditionalWriteResult, ConditionFailureReturnOptions
 import {TransactionWriteBuilder} from './transaction-write-builder';
 import type {TransactionItemOptions} from './transaction-write-builder';
 
+type Buffer = Uint8Array;
 type AnyRecord = Record<string, any>;
 type RecordSchema = z.ZodObject<z.ZodRawShape>;
 type RecordOf<TSchema extends RecordSchema> = z.output<TSchema>;

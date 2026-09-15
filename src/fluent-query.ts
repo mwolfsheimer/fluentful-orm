@@ -1,3 +1,5 @@
+type Buffer = Uint8Array;
+
 export type ComparisonValue = string | number | Buffer;
 export type ComparisonOperator = '=' | '<>' | '>' | '>=' | '<' | '<=' | 'contains';
 

@@ -1,6 +1,6 @@
 import {ConditionalCheckFailedException} from "@aws-sdk/client-dynamodb";
 import type {DynamoDBClient, TransactWriteItem} from "@aws-sdk/client-dynamodb";
-import type {TableDescription} from "@aws-sdk/client-dynamodb/dist-types/models/models_0";
+import type {TableDescription} from "@aws-sdk/client-dynamodb";
 import {runBatchChunks} from "./batch-runner";
 import {ExpressionBuilder} from "./expression-builder";
 import {createComparisonQuery, createConditionalQuery} from "./fluent-query";
@@ -10,6 +10,8 @@ import {QueryTableAdmin} from "./query-table-admin";
 import type {DynamoDBTableDefinition} from "./query-table-admin";
 import {QuerySerializer} from "./query-serializer";
 import {TransactionWriteBuilder} from "./transaction-write-builder";
+
+type Buffer = Uint8Array;
 import type {TransactionItemOptions} from "./transaction-write-builder";
 import {defineTable as defineTypedTable} from "./typed-table";
 import {UpdateExpressionType} from "./types";

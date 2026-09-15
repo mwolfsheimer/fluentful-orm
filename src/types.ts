@@ -1,15 +1,17 @@
+type Buffer = Uint8Array;
+
 export type SerialisedItem<T, A> = { L: SerialisedItem<T, any>[] } | { SS: T } | { M: A } | { NS: string[] } | { NULL: boolean } | { S: T } | { N: string } | { BOOL: T } | null
 export type SerialisedMap<T> = { [key: string]: SerialisedItem<T, any> }
 export type GenericDocument<T> = { [key: string]: T };
-export type GetDocumentSelector = GenericDocument<string | number | Buffer>;
+export type GetDocumentSelector = GenericDocument<string | number | Uint8Array>;
 export type GetStringSelector = { S: string };
 export type GetNumberSelector = { N: string };
 export type GetBoolSelector = { BOOL: boolean };
 export type GetNullSelector = { NULL: boolean };
 export type GetStringSetSelector = { SS: string[] };
 export type GetNumberSetSelector = { NS: string[] };
-export type GetBinarySelector = { B: Buffer };
-export type GetBinarySetSelector = { BS: Buffer[] };
+export type GetBinarySelector = { B: Uint8Array };
+export type GetBinarySetSelector = { BS: Uint8Array[] };
 export type GetMapSelector = { M: GenericDocument<GetSelector> };
 export type GetSelector =
     GetStringSelector
@@ -23,9 +25,9 @@ export type GetSelector =
     | GetBinarySelector
     | GetBinarySetSelector;
 export type GetListSelector = { L: GetSelector[] };
-export type QueryDocument = GenericDocument<string | number | Buffer>;
+export type QueryDocument = GenericDocument<string | number | Uint8Array>;
 /** Opaque key document returned by DynamoDB for paginated reads. */
-export type QueryCursor = GenericDocument<string | number | Buffer>;
+export type QueryCursor = GenericDocument<string | number | Uint8Array>;
 export type IndexKind = 'global' | 'local';
 
 /** Options for fetching one page or starting a paginated iterator. */
@@ -45,7 +47,7 @@ export interface BatchOptions {
     concurrency?: number;
 }
 /** Primary-key document accepted by an update operation. */
-export type UpdateDocumentSelector = GenericDocument<string | number | Buffer>;
+export type UpdateDocumentSelector = GenericDocument<string | number | Uint8Array>;
 export type UpdateDocumentWith = GenericDocument<any>;
 export type CreateDocumentWith = GenericDocument<any>;
 export type DeleteDocumentWith = GenericDocument<any>;

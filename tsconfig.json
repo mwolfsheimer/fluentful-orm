@@ -23,6 +23,7 @@
     "test/**/*.ts"
   ],
   "exclude": [
+    "test/consumer/**",
     "test/query-builder.integration.test.ts"
   ]
 }
