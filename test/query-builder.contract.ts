@@ -125,7 +125,7 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
                 assert.equal(error.Item, undefined);
                 return true;
             });
-        assert.deepEqual(await new QueryBuilder(tableName, dynamoDBClient).get({id: record.id}, true).toPromise(), record);
+        assert.deepEqual(await new QueryBuilder(tableName, dynamoDBClient).get({id: record.id}).consistent().toPromise(), record);
     });
 
     for (const operation of ['update', 'delete'] as const) {
@@ -149,7 +149,7 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
 
                 const execute = (expectedCount: number) => {
                     const builder = new QueryBuilder(tableName, dynamoDBClient);
-                    const write = operation === 'update'
+                    const write: any = operation === 'update'
                         ? builder.update({id: record.id}).set('count').eq(2).where('count').eq(expectedCount)
                         : builder.delete({id: record.id}).where('count').eq(expectedCount);
                     const configureFailure = () => {
@@ -165,7 +165,7 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
                     if (scenario.success === 'none') {
                         write.returningNone();
                     } else if (scenario.success === 'full') {
-                        if ('returningAllNew' in write) {
+                        if (operation === 'update') {
                             write.returningAllNew();
                         } else {
                             write.returningAllOld();
@@ -183,12 +183,12 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
                         scenario.failure === 'old' ? record : undefined);
                     return true;
                 });
-                assert.deepEqual(await new QueryBuilder(tableName, dynamoDBClient).get({id: record.id}, true).toPromise(), record);
+                assert.deepEqual(await new QueryBuilder(tableName, dynamoDBClient).get({id: record.id}).consistent().toPromise(), record);
 
                 const updatedRecord = {...record, count: 2};
                 assert.deepEqual(await execute(1), scenario.success === 'none'
                     ? undefined : operation === 'update' ? updatedRecord : record);
-                assert.deepEqual(await new QueryBuilder(tableName, dynamoDBClient).get({id: record.id}, true).toPromise(),
+                assert.deepEqual(await new QueryBuilder(tableName, dynamoDBClient).get({id: record.id}).consistent().toPromise(),
                     operation === 'update' ? updatedRecord : null);
             });
         }
@@ -219,10 +219,10 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
                 assert.deepEqual(await write(0).toResult<typeof replacement, typeof record>(), {
                     applied: false, previous: failureMode === 'old' ? record : null
                 });
-                assert.deepEqual(await new QueryBuilder(tableName, dynamoDBClient).get({id: record.id}, true).toPromise(), record);
+                assert.deepEqual(await new QueryBuilder(tableName, dynamoDBClient).get({id: record.id}).consistent().toPromise(), record);
                 const expectedValue = operation === 'create' ? replacement : operation === 'update' ? {...record, count: 2} : record;
                 assert.deepEqual(await write(1).toResult(), {applied: true, value: expectedValue});
-                assert.deepEqual(await new QueryBuilder(tableName, dynamoDBClient).get({id: record.id}, true).toPromise(),
+                assert.deepEqual(await new QueryBuilder(tableName, dynamoDBClient).get({id: record.id}).consistent().toPromise(),
                     operation === 'delete' ? null : expectedValue);
             });
         }
@@ -381,9 +381,9 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
             const query = () => new QueryBuilder(definition.name, dynamoDBClient);
             await query().create({group: 1, id: Buffer.from('first'), label: 'alpha'}).toPromise();
             await query().create({group: 1, id: Buffer.from('second'), label: 'beta'}).toPromise();
-            const record = await query().get({group: 1, id: Buffer.from('first')}, true).toPromise<{label: string}>();
+            const record = await query().get({group: 1, id: Buffer.from('first')}).consistent().toPromise<{label: string}>();
             assert.equal(record.label, 'alpha');
-            const matched = await query().query({group: 1}, true).sortKey('label').beginsWith('al')
+            const matched = await query().query({group: 1}).consistent().sortKey('label').beginsWith('al')
                 .usingIndex('label-index', 'local').toPromise<{label: string}[]>();
             assert.deepEqual(matched.map((item) => item.label), ['alpha']);
         } finally {
@@ -442,7 +442,7 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
                 () => query().query({group: 1}).usingIndex('stats').toPromise<any[]>(),
                 1
             );
-            const local = await query().query({group: 1}, true)
+            const local = await query().query({group: 1}).consistent()
                 .usingIndex('label', 'local')
                 .select('payload')
                 .toPromise<any[]>();
@@ -459,7 +459,7 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
                 DynamoDBServiceException
             );
             await assert.rejects(
-                query().query({group: 1}, true).usingIndex('label', 'local').where('payload').eq('base-only').toPromise(),
+                query().query({group: 1}).consistent().usingIndex('label', 'local').where('payload').eq('base-only').toPromise(),
                 DynamoDBServiceException
             );
         } finally {
@@ -1108,8 +1108,7 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
 
         const fetched = await new QueryBuilder(tableName, dynamoDBClient).getBatch<any>(
             [{id: 'batch-1'}, {id: 'batch-3'}],
-            false,
-            true
+            {consistentRead: true}
         );
         assert.deepEqual(fetched.map((item) => item.id).sort(), ['batch-1', 'batch-3']);
 
@@ -1299,19 +1298,19 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
         await new QueryBuilder(compositeTableName, dynamoDBClient).createBatch(documents);
 
         const all = await new QueryBuilder(compositeTableName, dynamoDBClient)
-            .query({id: 'paged-query'}, true)
+            .query({id: 'paged-query'}).consistent()
             .limit(2, null)
             .toPromise<any[]>();
         assert.deepEqual(all.map((item) => item.sort), [1, 2, 3, 4, 5, 6]);
 
         const limited = await new QueryBuilder(compositeTableName, dynamoDBClient)
-            .query({id: 'paged-query'}, true)
+            .query({id: 'paged-query'}).consistent()
             .limit(2, 5)
             .toPromise<any[]>();
         assert.deepEqual(limited.map((item) => item.sort), [1, 2, 3, 4, 5]);
 
         const filtered = await new QueryBuilder(compositeTableName, dynamoDBClient)
-            .query({id: 'paged-query'}, true)
+            .query({id: 'paged-query'}).consistent()
             .limit(2, null)
             .where('value').gt(30)
             .toPromise<any[]>();
@@ -1335,20 +1334,20 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
         }));
         await table.using(dynamoDBClient).createBatch(documents, {concurrency: 2});
 
-        const first = await table.using(dynamoDBClient).query({id: 'cursor-query'}, true).page({limit: 2});
-        const second = await table.using(dynamoDBClient).query({id: 'cursor-query'}, true).page({limit: 2, cursor: first.cursor});
+        const first = await table.using(dynamoDBClient).query({id: 'cursor-query'}).consistent().page({limit: 2});
+        const second = await table.using(dynamoDBClient).query({id: 'cursor-query'}).consistent().page({limit: 2, cursor: first.cursor});
         assert.deepEqual(first.items.map((item) => item.sort), [1, 2]);
         assert.deepEqual(first.cursor, {id: 'cursor-query', sort: 2});
         assert.deepEqual(second.items.map((item) => item.sort), [3, 4]);
 
         const streamed: number[] = [];
-        for await (const item of table.using(dynamoDBClient).query({id: 'cursor-query'}, true).items({limit: 2})) {
+        for await (const item of table.using(dynamoDBClient).query({id: 'cursor-query'}).consistent().items({limit: 2})) {
             streamed.push(item.sort);
         }
         assert.deepEqual(streamed, [1, 2, 3, 4, 5]);
 
         await assert.rejects(
-            table.using(dynamoDBClient).query({id: 'cursor-query'}, true).page({cursor: {id: 'cursor-query'}}),
+            table.using(dynamoDBClient).query({id: 'cursor-query'}).consistent().page({cursor: {id: 'cursor-query'}}),
             (error) => error instanceof DynamoDBServiceException && error.name === 'ValidationException'
         );
 
@@ -1375,13 +1374,13 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
         await table.using(dynamoDBClient).createBatch(documents, {concurrency: 2});
 
         const projected = await table.using(dynamoDBClient)
-            .scan(true)
+            .scan().consistent()
             .limit(2, null)
             .where('group').eq('selected')
             .select('id', 'value')
             .toPromise();
         const count = await table.using(dynamoDBClient)
-            .scan(true)
+            .scan().consistent()
             .limit(2, null)
             .where('group').eq('selected')
             .count()
@@ -1410,7 +1409,7 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
             .where('id').exists()
             .toPromise();
         assert.equal(updated, undefined);
-        assert.equal((await new QueryBuilder(tableName, dynamoDBClient).get({id: 'bounded-live-0'}, true).toPromise<any>()).value, 42);
+        assert.equal((await new QueryBuilder(tableName, dynamoDBClient).get({id: 'bounded-live-0'}).consistent().toPromise<any>()).value, 42);
 
         await assert.rejects(
             new QueryBuilder(tableName, dynamoDBClient)
@@ -1446,7 +1445,7 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
             .returningNone()
             .toPromise();
         assert.equal(deleted, undefined);
-        assert.equal(await new QueryBuilder(tableName, dynamoDBClient).get({id: 'bounded-live-0'}, true).toPromise(), null);
+        assert.equal(await new QueryBuilder(tableName, dynamoDBClient).get({id: 'bounded-live-0'}).consistent().toPromise(), null);
 
         await new QueryBuilder(tableName, dynamoDBClient).deleteBatch(
             documents.slice(1).map((document) => ({id: document.id})),
@@ -1482,7 +1481,7 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
     test('rejects consistent global secondary index queries before sending', () => {
         assert.throws(
             () => new QueryBuilder(compositeTableName, dynamoDBClient)
-                .query({category: 'greeting'}, true)
+                .query({category: 'greeting'}).consistent()
                 .usingIndex('category-index'),
             /Global secondary index category-index does not support consistent reads/
         );
@@ -1695,7 +1694,7 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
         const updated = await query().update({id: 'isolated-values'})
             .with({nested: {value: 3}}).toPromise<{nested: {value: number}}>();
         updated.nested.value = 99;
-        assert.deepEqual(await query().get({id: 'isolated-values'}, true).toPromise(), {
+        assert.deepEqual(await query().get({id: 'isolated-values'}).consistent().toPromise(), {
             id: 'isolated-values', value: 1, nested: {value: 3}
         });
         await query().delete({id: 'isolated-values'}).toPromise();
@@ -1715,8 +1714,8 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
                 return true;
             });
         assert.equal(await new QueryBuilder(compositeTableName, dynamoDBClient)
-            .get({id: 'diagnostic-order', sort: 1}, true).toPromise(), null);
-        assert.deepEqual(await query().get({id: 'diagnostic-balance'}, true).toPromise(), {id: 'diagnostic-balance', value: 1});
+            .get({id: 'diagnostic-order', sort: 1}).consistent().toPromise(), null);
+        assert.deepEqual(await query().get({id: 'diagnostic-balance'}).consistent().toPromise(), {id: 'diagnostic-balance', value: 1});
         await query().delete({id: 'diagnostic-balance'}).toPromise();
     });
 
@@ -1731,7 +1730,7 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
         const rejected = results.find((result) => result.status === 'rejected');
         assert.ok(rejected !== undefined && rejected.status === 'rejected');
         assert.ok(rejected.reason instanceof TransactionCanceledException);
-        assert.deepEqual(await records.get({id: 'concurrent-balance'}, true).toPromise(), {id: 'concurrent-balance', value: 0});
+        assert.deepEqual(await records.get({id: 'concurrent-balance'}).consistent().toPromise(), {id: 'concurrent-balance', value: 0});
         await records.delete({id: 'concurrent-balance'}).toPromise();
     });
 
@@ -1744,7 +1743,7 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
         await increment(1);
         await increment(1);
         await assert.rejects(increment(2), {name: 'IdempotentParameterMismatchException'});
-        assert.deepEqual(await query().get({id: 'idempotent-counter'}, true).toPromise(), {id: 'idempotent-counter', value: 1});
+        assert.deepEqual(await query().get({id: 'idempotent-counter'}).consistent().toPromise(), {id: 'idempotent-counter', value: 1});
         await query().delete({id: 'idempotent-counter'}).toPromise();
     });
 });

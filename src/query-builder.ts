@@ -16,7 +16,7 @@ type Binary = Uint8Array;
 import {defineTable as defineTypedTable} from "./typed-table";
 import {UpdateExpressionType} from "./types";
 import type {ConditionalWriteResult} from "./types";
-import type {AddSubQuery, BatchOptions, ConditionCheckNotWhereQuery, ConditionCheckQuery, ConditionFailureReturnOptions, CountFinal, CreateDocumentWith, CreateNotWhereQuery, CreateQuery, DeleteDocumentWith, DeleteNotWhereQuery, DeleteQuery, Final, GenericDocument, GetDocumentSelector, GetDocumentWith, GetSelector, IndexKind, PageOptions, Query, QueryCursor, QueryDocument, QueryPage, QueryScanWhereSubQuery, Scan, SetSubQuery, SubQuery, UpdateDocumentSelector, UpdateDocumentWith, UpdateEqQuery, UpdateNotWhereQuery, UpdateQuery, UpdateSubQuery, UpdateWithQuery} from "./types";
+import type {AddSubQuery, BatchGetOptions, BatchOptions, BatchWriteOptions, ConditionCheckNotWhereQuery, ConditionCheckQuery, ConditionFailureReturnOptions, CountFinal, CreateDocumentWith, CreateNotWhereQuery, CreateQuery, DeleteDocumentWith, DeleteNotWhereQuery, DeleteQuery, DynamoResponse, Final, GenericDocument, GetDocumentSelector, GetDocumentWith, GetSelector, IndexKind, PageOptions, Query, QueryCursor, QueryDocument, QueryPage, QueryScanWhereSubQuery, ReturnConsumedCapacity, Scan, SetSubQuery, SubQuery, UpdateDocumentSelector, UpdateDocumentWith, UpdateEqQuery, UpdateNotWhereQuery, UpdateQuery, UpdateSubQuery, UpdateWithQuery} from "./types";
 import {ValueUtils} from "./value-utils";
 
 let requestId = '0';
@@ -31,6 +31,7 @@ export class QueryBuilder {
     private _rid = (requestId = (parseInt(requestId, 16) + 1).toString(16));
     private _writeTimestamps: boolean = false;
     private _executed: Promise<any> | null = null;
+    private _response: Promise<DynamoResponse<any>> | null = null;
     private _result: Promise<ConditionalWriteResult<unknown, unknown>> | null = null;
     private _executionMode: 'all' | 'page' | 'iterator' | null = null;
     private _projection: string[] | null = null;
@@ -111,12 +112,22 @@ export class QueryBuilder {
             toResult: this.toResult.bind(this),
             where: this.updateWhereCondition.bind(this),
             returningAllNew: this.updateReturningAllNew.bind(this),
+            returningAllOld: this.updateReturningAllOld.bind(this),
             returningNone: this.updateReturningNone.bind(this),
+            returnCapacity: (mode) => {
+                this.returnCapacity(mode);
+                return this.updateSubQuery();
+            },
+            returnItemCollectionMetrics: () => {
+                this.returnItemCollectionMetrics();
+                return this.updateSubQuery();
+            },
             set: this.set_set.bind(this),
             remove: this.set_remove.bind(this),
             add: this.set_add.bind(this),
             delete: this.set_delete.bind(this),
             toPromise: this.toPromise.bind(this),
+            toResponse: this.toResponse.bind(this),
             toPromiseOrNull: this.toPromiseOrNull.bind(this)
         };
     }
@@ -145,7 +156,7 @@ export class QueryBuilder {
         return this.createQueryResult();
     }
 
-    private createBatchWorker(docs: CreateDocumentWith[]): Final {
+    private createBatchWorker(docs: CreateDocumentWith[]): QueryBuilder {
         const now = Date.now();
 
         if (this._writeTimestamps) {
@@ -168,20 +179,24 @@ export class QueryBuilder {
         })};
         this.request.startBatchWrite(requestItems);
 
-        return {
-            toPromise: this.toPromise.bind(this)
-        };
+        return this;
     }
 
     /** Creates records in batches of 25 with configurable concurrency. */
-    public createBatch<T>(docs: CreateDocumentWith[], options: BatchOptions | boolean = {}): Promise<T[]> {
+    public createBatch<T>(docs: CreateDocumentWith[], options: BatchWriteOptions | boolean = {}): Promise<T[]> {
         docs = ValueUtils.clone(docs) as CreateDocumentWith[];
         return runBatchChunks(docs, 25, this.batchConcurrency(options), (chunk) => {
-            return new QueryBuilder(this.tableName, this.dynamoDB, this.documentParser)
+            const builder = new QueryBuilder(this.tableName, this.dynamoDB, this.documentParser)
                 .logger(this._logger)
                 .timestamps(this._writeTimestamps)
-                .createBatchWorker(chunk)
-                .toPromise<T[]>();
+                .createBatchWorker(chunk);
+            if (typeof options !== 'boolean') {
+                builder.returnCapacity(options.returnConsumedCapacity);
+                if (options.returnItemCollectionMetrics === 'SIZE') {
+                    builder.returnItemCollectionMetrics();
+                }
+            }
+            return builder.toPromise<T[]>();
         })
             .then((result) => result.flat(1) as T[]);
     }
@@ -214,7 +229,7 @@ export class QueryBuilder {
         return this.conditionCheckQueryResult();
     }
 
-    private deleteBatchWorker(docs: CreateDocumentWith[]): Final {
+    private deleteBatchWorker(docs: CreateDocumentWith[]): QueryBuilder {
         const requestItems = {[this.tableName]: docs.map((item) => {
             return {
                 DeleteRequest: {
@@ -224,20 +239,24 @@ export class QueryBuilder {
         })};
         this.request.startBatchWrite(requestItems);
 
-        return {
-            toPromise: this.toPromise.bind(this)
-        };
+        return this;
     }
 
     /** Deletes records in batches of 25 with configurable concurrency. */
-    public deleteBatch<T>(docs: DeleteDocumentWith[], options: BatchOptions | boolean = {}): Promise<void> {
+    public deleteBatch<T>(docs: DeleteDocumentWith[], options: BatchWriteOptions | boolean = {}): Promise<void> {
         docs = ValueUtils.clone(docs) as CreateDocumentWith[];
         return runBatchChunks(docs, 25, this.batchConcurrency(options), (chunk) => {
-            return new QueryBuilder(this.tableName, this.dynamoDB, this.documentParser)
+            const builder = new QueryBuilder(this.tableName, this.dynamoDB, this.documentParser)
                 .logger(this._logger)
                 .timestamps(this._writeTimestamps)
-                .deleteBatchWorker(chunk)
-                .toPromise();
+                .deleteBatchWorker(chunk);
+            if (typeof options !== 'boolean') {
+                builder.returnCapacity(options.returnConsumedCapacity);
+                if (options.returnItemCollectionMetrics === 'SIZE') {
+                    builder.returnItemCollectionMetrics();
+                }
+            }
+            return builder.toPromise();
         }).then(() => undefined);
     }
 
@@ -256,7 +275,7 @@ export class QueryBuilder {
     }
 
     /** Starts a GetItem operation for the supplied primary key. */
-    public get(doc: GetDocumentSelector, consistentRead = false): QueryBuilder {
+    public get(doc: GetDocumentSelector): QueryBuilder {
         const key: GenericDocument<GetSelector> = {};
 
         for (let keyName in doc) {
@@ -264,24 +283,36 @@ export class QueryBuilder {
                 key[keyName] = QuerySerializer.serialiseItem(doc[keyName]);
             }
         }
-        this.request.startGet(this.tableName, key, consistentRead);
+        this.request.startGet(this.tableName, key, false);
 
         return this
     }
 
-    private getBatchWorker(keys: GenericDocument<GetSelector>[], consistentRead = false): QueryBuilder {
-        this.request.startBatchGet({
-            [this.tableName]: {
-                ConsistentRead: consistentRead,
-                Keys: keys
-            }
-        });
+    private getBatchWorker(keys: GenericDocument<GetSelector>[], consistentRead = false, select?: string[]): QueryBuilder {
+        const unique = select === undefined ? undefined : Array.from(new Set(select));
+        if (unique !== undefined && (unique.length === 0 || unique.some((attribute) => typeof attribute !== 'string' || attribute.length === 0))) {
+            throw new Error('Projection requires at least one attribute');
+        }
+        if (unique !== undefined) {
+            this._projection = unique;
+        }
+        const request = {ConsistentRead: consistentRead, Keys: keys} as {
+            ConsistentRead: boolean;
+            Keys: GenericDocument<GetSelector>[];
+            ProjectionExpression?: string;
+            ExpressionAttributeNames?: Record<string, string>;
+        };
+        if (unique !== undefined) {
+            request.ProjectionExpression = unique.map((attribute) => `#${attribute}`).join(', ');
+            request.ExpressionAttributeNames = Object.fromEntries(unique.map((attribute) => [`#${attribute}`, attribute]));
+        }
+        this.request.startBatchGet({[this.tableName]: request});
 
         return this
     }
 
     /** Reads records in batches of 100, deduplicating duplicate keys before sending requests. */
-    public getBatch<T>(docs: GetDocumentWith[], options: BatchOptions | boolean = {}, consistentRead = false): Promise<T[]> {
+    public getBatch<T>(docs: GetDocumentWith[], options: BatchGetOptions | boolean = {}): Promise<T[]> {
         docs = ValueUtils.clone(docs) as GetDocumentWith[];
 
         // DynamoDB rejects BatchGetItem requests containing duplicate keys.
@@ -299,12 +330,15 @@ export class QueryBuilder {
             serialisedKeys.push(serialised);
         });
 
+        const batchOptions: BatchGetOptions = typeof options === 'boolean' ? {} : options;
+        const readConsistency = batchOptions.consistentRead === true;
         return runBatchChunks(serialisedKeys, 100, this.batchConcurrency(options), (chunk) => {
-            return new QueryBuilder(this.tableName, this.dynamoDB, this.documentParser)
+            const builder = new QueryBuilder(this.tableName, this.dynamoDB, this.documentParser)
                 .logger(this._logger)
                 .timestamps(this._writeTimestamps)
-                .getBatchWorker(chunk, consistentRead)
-                .toPromise<T[]>();
+                .getBatchWorker(chunk, readConsistency, batchOptions.select);
+            builder.returnCapacity(batchOptions.returnConsumedCapacity);
+            return builder.toPromise<T[]>();
         }).then((result) => result.flat(1));
     }
 
@@ -324,36 +358,128 @@ export class QueryBuilder {
         this.request.setIndex(index, kind);
 
         return {
+            consistent: this.subQueryConsistent.bind(this),
+            ascending: this.subQueryAscending.bind(this),
+            descending: this.subQueryDescending.bind(this),
+            returnCapacity: this.subQueryReturnCapacity.bind(this),
             where: this.queryAndScanWhere.bind(this),
             select: this.subQuerySelect.bind(this),
             count: this.count.bind(this),
             page: this.page.bind(this),
             pages: this.pages.bind(this),
             items: this.items.bind(this),
-            toPromise: this.toPromise.bind(this)
+            toPromise: this.toPromise.bind(this),
+            toResponse: this.toResponse.bind(this)
         };
     }
 
     /** Starts a Scan operation. */
-    public scan(consistentRead = false): Scan {
-        this.request.startScan(this.tableName, consistentRead);
-
-        return {
-            limit: this.scanLimit.bind(this),
-            where: this.queryAndScanWhere.bind(this),
-            select: this.scanSelect.bind(this),
-            count: this.count.bind(this),
-            page: this.page.bind(this),
-            pages: this.pages.bind(this),
-            items: this.items.bind(this),
-            toPromise: this.toPromise.bind(this)
-        };
+    public scan(): Scan {
+        this.request.startScan(this.tableName, false);
+        return this.scanResult();
     }
 
     /** Sets an optional request logger and returns this builder. */
     public logger(logger: null | ((msg: any) => void) = null): QueryBuilder {
         this._logger = logger;
         return this;
+    }
+
+    /** Requests a strongly consistent get, query, or scan. */
+    public consistent(): QueryBuilder {
+        this.request.setConsistentRead();
+        return this;
+    }
+
+    /** Requests DynamoDB consumed-capacity metadata for toResponse(). */
+    public returnCapacity(mode: ReturnConsumedCapacity = 'INDEXES'): QueryBuilder {
+        this.request.setReturnConsumedCapacity(mode);
+        return this;
+    }
+
+    /** Requests local-secondary-index item-collection metrics for toResponse(). */
+    public returnItemCollectionMetrics(): QueryBuilder {
+        this.request.setReturnItemCollectionMetrics('SIZE');
+        return this;
+    }
+
+    /** Orders a query by ascending sort key. */
+    public ascending(): QueryBuilder {
+        this.request.setScanIndexForward(true);
+        return this;
+    }
+
+    /** Orders a query by descending sort key. */
+    public descending(): QueryBuilder {
+        this.request.setScanIndexForward(false);
+        return this;
+    }
+
+    /** Configures one segment of a parallel scan. */
+    public parallel(segment: number, totalSegments: number): QueryBuilder {
+        this.request.setParallelScan(segment, totalSegments);
+        return this;
+    }
+
+    /** Projects selected attributes from a GetItem operation. */
+    public select(...attributes: string[]): QueryBuilder {
+        this.applyProjection(attributes);
+        return this;
+    }
+
+    private queryConsistent(): Query {
+        this.consistent();
+        return this.queryResult();
+    }
+
+    private queryAscending(): Query {
+        this.ascending();
+        return this.queryResult();
+    }
+
+    private queryDescending(): Query {
+        this.descending();
+        return this.queryResult();
+    }
+
+    private queryReturnCapacity(mode?: ReturnConsumedCapacity): Query {
+        this.returnCapacity(mode);
+        return this.queryResult();
+    }
+
+    private subQueryConsistent(): SubQuery {
+        this.consistent();
+        return this.subQuery();
+    }
+
+    private subQueryAscending(): SubQuery {
+        this.ascending();
+        return this.subQuery();
+    }
+
+    private subQueryDescending(): SubQuery {
+        this.descending();
+        return this.subQuery();
+    }
+
+    private subQueryReturnCapacity(mode?: ReturnConsumedCapacity): SubQuery {
+        this.returnCapacity(mode);
+        return this.subQuery();
+    }
+
+    private scanConsistent(): Scan {
+        this.consistent();
+        return this.scanResult();
+    }
+
+    private scanParallel(segment: number, totalSegments: number): Scan {
+        this.parallel(segment, totalSegments);
+        return this.scanResult();
+    }
+
+    private scanReturnCapacity(mode?: ReturnConsumedCapacity): Scan {
+        this.returnCapacity(mode);
+        return this.scanResult();
     }
 
     /** Enables or disables automatic `createdAt` and `modifiedAt` write timestamps. */
@@ -383,8 +509,8 @@ export class QueryBuilder {
     }
 
     /** Starts a Query operation using equality conditions for the supplied partition-key document. */
-    public query(doc: QueryDocument, consistentRead = false): Query {
-        this.request.startQuery(this.tableName, consistentRead);
+    public query(doc: QueryDocument): Query {
+        this.request.startQuery(this.tableName, false);
 
         for (const key in doc) {
             if (doc.hasOwnProperty(key)) {
@@ -396,6 +522,10 @@ export class QueryBuilder {
 
         return {
             limit: this.queryLimit.bind(this),
+            consistent: this.queryConsistent.bind(this),
+            ascending: this.queryAscending.bind(this),
+            descending: this.queryDescending.bind(this),
+            returnCapacity: this.queryReturnCapacity.bind(this),
             where: this.queryAndScanWhere.bind(this),
             usingIndex: this.usingIndex.bind(this),
             sortKey: this.querySortKey.bind(this),
@@ -404,7 +534,8 @@ export class QueryBuilder {
             page: this.page.bind(this),
             pages: this.pages.bind(this),
             items: this.items.bind(this),
-            toPromise: this.toPromise.bind(this)
+            toPromise: this.toPromise.bind(this),
+            toResponse: this.toResponse.bind(this)
         };
     }
 
@@ -434,6 +565,10 @@ export class QueryBuilder {
     private queryResult(): Query {
         return {
             limit: this.queryLimit.bind(this),
+            consistent: this.queryConsistent.bind(this),
+            ascending: this.queryAscending.bind(this),
+            descending: this.queryDescending.bind(this),
+            returnCapacity: this.queryReturnCapacity.bind(this),
             where: this.queryAndScanWhere.bind(this),
             usingIndex: this.usingIndex.bind(this),
             sortKey: this.querySortKey.bind(this),
@@ -442,7 +577,8 @@ export class QueryBuilder {
             page: this.page.bind(this),
             pages: this.pages.bind(this),
             items: this.items.bind(this),
-            toPromise: this.toPromise.bind(this)
+            toPromise: this.toPromise.bind(this),
+            toResponse: this.toResponse.bind(this)
         };
     }
 
@@ -480,13 +616,18 @@ export class QueryBuilder {
 
     private subQuery(): SubQuery {
         return {
+            consistent: this.subQueryConsistent.bind(this),
+            ascending: this.subQueryAscending.bind(this),
+            descending: this.subQueryDescending.bind(this),
+            returnCapacity: this.subQueryReturnCapacity.bind(this),
             where: this.queryAndScanWhere.bind(this),
             select: this.subQuerySelect.bind(this),
             count: this.count.bind(this),
             page: this.page.bind(this),
             pages: this.pages.bind(this),
             items: this.items.bind(this),
-            toPromise: this.toPromise.bind(this)
+            toPromise: this.toPromise.bind(this),
+            toResponse: this.toResponse.bind(this)
         };
     }
 
@@ -504,7 +645,17 @@ export class QueryBuilder {
             ...this.conditionFailureReturnQuery(() => this.createQueryResult()),
             toResult: this.toResult.bind(this),
             where: this.createWhereCondition.bind(this),
-            toPromise: this.toPromise.bind(this)
+            returningAllOld: this.createReturningAllOld.bind(this),
+            returnCapacity: (mode) => {
+                this.returnCapacity(mode);
+                return this.createQueryResult();
+            },
+            returnItemCollectionMetrics: () => {
+                this.returnItemCollectionMetrics();
+                return this.createQueryResult();
+            },
+            toPromise: this.toPromise.bind(this),
+            toResponse: this.toResponse.bind(this)
         };
     }
 
@@ -524,13 +675,27 @@ export class QueryBuilder {
             where: this.deleteWhereCondition.bind(this),
             returningAllOld: this.deleteReturningAllOld.bind(this),
             returningNone: this.deleteReturningNone.bind(this),
-            toPromise: this.toPromise.bind(this)
+            returnCapacity: (mode) => {
+                this.returnCapacity(mode);
+                return this.deleteQueryResult();
+            },
+            returnItemCollectionMetrics: () => {
+                this.returnItemCollectionMetrics();
+                return this.deleteQueryResult();
+            },
+            toPromise: this.toPromise.bind(this),
+            toResponse: this.toResponse.bind(this)
         };
     }
 
     private deleteReturningAllOld(): DeleteQuery {
         this.request.setDeleteReturnValues('ALL_OLD');
         return this.deleteQueryResult();
+    }
+
+    private createReturningAllOld(): CreateQuery {
+        this.request.setPutReturnValues('ALL_OLD');
+        return this.createQueryResult();
     }
 
     private deleteReturningNone(): DeleteQuery {
@@ -551,7 +716,8 @@ export class QueryBuilder {
         return {
             ...this.conditionFailureReturnQuery(() => this.conditionCheckQueryResult()),
             where: this.conditionCheckWhereCondition.bind(this),
-            toPromise: this.toPromise.bind(this)
+            toPromise: this.toPromise.bind(this),
+            toResponse: this.toResponse.bind(this)
         };
     }
 
@@ -579,6 +745,11 @@ export class QueryBuilder {
         return this.updateSubQuery();
     }
 
+    private updateReturningAllOld(): UpdateSubQuery {
+        this.request.setUpdateReturnValues('ALL_OLD');
+        return this.updateSubQuery();
+    }
+
     private updateReturningNone(): UpdateSubQuery {
         this.request.setUpdateReturnValues('NONE');
         return this.updateWithQuery();
@@ -597,16 +768,7 @@ export class QueryBuilder {
         this.request.setLimit(chunkSize);
         this._hardLimit = hardLimit;
 
-        return {
-            limit: this.scanLimit.bind(this),
-            where: this.queryAndScanWhere.bind(this),
-            select: this.scanSelect.bind(this),
-            count: this.count.bind(this),
-            page: this.page.bind(this),
-            pages: this.pages.bind(this),
-            items: this.items.bind(this),
-            toPromise: this.toPromise.bind(this)
-        };
+        return this.scanResult();
     }
 
     private queryLimit(chunkSize: number, hardLimit: number | null = null): Query {
@@ -624,6 +786,10 @@ export class QueryBuilder {
 
         return {
             limit: this.queryLimit.bind(this),
+            consistent: this.queryConsistent.bind(this),
+            ascending: this.queryAscending.bind(this),
+            descending: this.queryDescending.bind(this),
+            returnCapacity: this.queryReturnCapacity.bind(this),
             usingIndex: this.usingIndex.bind(this),
             sortKey: this.querySortKey.bind(this),
             where: this.queryAndScanWhere.bind(this),
@@ -632,7 +798,8 @@ export class QueryBuilder {
             page: this.page.bind(this),
             pages: this.pages.bind(this),
             items: this.items.bind(this),
-            toPromise: this.toPromise.bind(this)
+            toPromise: this.toPromise.bind(this),
+            toResponse: this.toResponse.bind(this)
         };
     }
 
@@ -643,15 +810,23 @@ export class QueryBuilder {
 
     private scanSelect(...attributes: string[]): Scan {
         this.applyProjection(attributes);
+        return this.scanResult();
+    }
+
+    private scanResult(): Scan {
         return {
             limit: this.scanLimit.bind(this),
+            consistent: this.scanConsistent.bind(this),
+            parallel: this.scanParallel.bind(this),
+            returnCapacity: this.scanReturnCapacity.bind(this),
             where: this.queryAndScanWhere.bind(this),
             select: this.scanSelect.bind(this),
             count: this.count.bind(this),
             page: this.page.bind(this),
             pages: this.pages.bind(this),
             items: this.items.bind(this),
-            toPromise: this.toPromise.bind(this)
+            toPromise: this.toPromise.bind(this),
+            toResponse: this.toResponse.bind(this)
         };
     }
 
@@ -679,7 +854,7 @@ export class QueryBuilder {
         }
         this._count = true;
         this.request.setCount();
-        return {toPromise: this.toPromise.bind(this)};
+        return {toPromise: this.toPromise.bind(this), toResponse: this.toResponse.bind(this)};
     }
 
     private page<T>(options: PageOptions = {}): Promise<QueryPage<T>> {
@@ -846,27 +1021,31 @@ export class QueryBuilder {
             return this._executed as Promise<T>;
         }
 
+        this._executed = this.toResponse<T>().then((response) => response.value);
+        return this._executed as Promise<T>;
+    }
+
+    /** Executes the configured operation and returns its value with DynamoDB metadata. */
+    toResponse<T>(): Promise<DynamoResponse<T>> {
+        if (this._response !== null) {
+            return this._response as Promise<DynamoResponse<T>>;
+        }
         this.assertExecutionAvailable('all');
         this.request.applyExpressions(this.expressions);
         const operation = this.request.getOperation();
-
-        if (operation === null) {
-            this._executed = Promise.resolve();
-            return this._executed as Promise<T>;
-        }
-
-        this._executed = new QueryExecutor(
-            this.dynamoDB,
-            operation,
-            this._docs,
-            this._hardLimit,
-            this._logger,
-            this._rid,
-            this.documentParser,
-            this._projection
-        ).execute<T>();
-
-        return this._executed as Promise<T>;
+        this._response = operation === null
+            ? Promise.resolve({value: undefined, consumedCapacity: [], itemCollectionMetrics: []})
+            : new QueryExecutor(
+                this.dynamoDB,
+                operation,
+                this._docs,
+                this._hardLimit,
+                this._logger,
+                this._rid,
+                this.documentParser,
+                this._projection
+            ).executeResponse<T>() as Promise<DynamoResponse<any>>;
+        return this._response as Promise<DynamoResponse<T>>;
     }
 
     private toResult<T, TPrevious = T>(): Promise<ConditionalWriteResult<T, TPrevious>> {

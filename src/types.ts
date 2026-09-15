@@ -1,3 +1,5 @@
+import type {ConsumedCapacity, ItemCollectionMetrics} from '@aws-sdk/client-dynamodb';
+
 type Binary = Uint8Array;
 
 export type SerialisedItem<T, A> = { L: SerialisedItem<T, any>[] } | { SS: T } | { M: A } | { NS: string[] } | { NULL: boolean } | { S: T } | { N: string } | { BOOL: T } | null
@@ -42,9 +44,33 @@ export interface QueryPage<T> {
     cursor: QueryCursor | null;
 }
 
+/** DynamoDB metadata returned alongside a fluent operation result. */
+export interface DynamoResponse<T> {
+    /** The operation's existing value result. */
+    value: T;
+    /** One capacity report for each SDK request, including pages and batch retries. */
+    consumedCapacity: readonly ConsumedCapacity[];
+    /** Item-collection size estimates returned by writes to tables with local secondary indexes. */
+    itemCollectionMetrics: readonly ItemCollectionMetrics[];
+}
+
+/** DynamoDB's capacity-reporting modes. */
+export type ReturnConsumedCapacity = 'NONE' | 'TOTAL' | 'INDEXES';
+
 /** Controls the number of concurrent requests used by batch operations. */
 export interface BatchOptions {
     concurrency?: number;
+}
+/** Batch read options in addition to chunk concurrency. */
+export interface BatchGetOptions extends BatchOptions {
+    consistentRead?: boolean;
+    select?: string[];
+    returnConsumedCapacity?: ReturnConsumedCapacity;
+}
+/** Batch write options in addition to chunk concurrency. */
+export interface BatchWriteOptions extends BatchOptions {
+    returnConsumedCapacity?: ReturnConsumedCapacity;
+    returnItemCollectionMetrics?: 'NONE' | 'SIZE';
 }
 /** Primary-key document accepted by an update operation. */
 export type UpdateDocumentSelector = GenericDocument<string | number | Uint8Array>;
@@ -116,8 +142,16 @@ export interface ConditionFailureReturnOptions<T> {
 export interface CreateQuery extends ConditionFailureReturnQuery<CreateQuery>, ConditionalWriteFinal {
     /** Adds a condition to the new item before it is created. */
     where(key: string): CreateNotWhereQuery;
+    /** Returns the item replaced by a successful put, if any. */
+    returningAllOld(): CreateQuery;
+    /** Requests consumed-capacity metadata in toResponse(). */
+    returnCapacity(mode?: ReturnConsumedCapacity): CreateQuery;
+    /** Requests local-secondary-index item-collection metrics in toResponse(). */
+    returnItemCollectionMetrics(): CreateQuery;
     /** Executes the create and returns the SDK result payload. */
     toPromise<T>(): PromiseFinal<T>;
+    /** Executes the create and returns its value with DynamoDB request metadata. */
+    toResponse<T>(): PromiseFinal<DynamoResponse<T>>;
 }
 
 /** Comparison methods available while building a delete condition. */
@@ -156,8 +190,14 @@ export interface DeleteQuery extends ConditionFailureReturnQuery<DeleteQuery>, C
     returningAllOld(): DeleteQuery;
     /** Omits the deleted item from the successful result. */
     returningNone(): DeleteQuery;
+    /** Requests consumed-capacity metadata in toResponse(). */
+    returnCapacity(mode?: ReturnConsumedCapacity): DeleteQuery;
+    /** Requests local-secondary-index item-collection metrics in toResponse(). */
+    returnItemCollectionMetrics(): DeleteQuery;
     /** Executes the delete and returns the SDK result payload. */
     toPromise<T>(): PromiseFinal<T>;
+    /** Executes the delete and returns its value with DynamoDB request metadata. */
+    toResponse<T>(): PromiseFinal<DynamoResponse<T>>;
 }
 
 /** Comparison methods available while building a condition-check condition. */
@@ -194,12 +234,22 @@ export interface ConditionCheckQuery extends ConditionFailureReturnQuery<Conditi
     where(key: string): ConditionCheckNotWhereQuery;
     /** Executes the condition check. */
     toPromise<T>(): PromiseFinal<T>;
+    /** Executes the condition check and returns its value with DynamoDB request metadata. */
+    toResponse<T>(): PromiseFinal<DynamoResponse<T>>;
 }
 
 /** Fluent operations for a DynamoDB query. */
 export interface Query {
     /** Sets the DynamoDB page size and optional all-page hard limit. */
     limit(chunkSize: number, hardLimit: number | null): Query;
+    /** Requests a strongly consistent table or local-index read. */
+    consistent(): Query;
+    /** Returns query results in ascending sort-key order. */
+    ascending(): Query;
+    /** Returns query results in descending sort-key order. */
+    descending(): Query;
+    /** Requests consumed-capacity metadata in toResponse(). */
+    returnCapacity(mode?: ReturnConsumedCapacity): Query;
     /** Runs the query against a declared secondary index. */
     usingIndex(index: string, kind?: IndexKind): SubQuery;
     /** Adds a comparison against the table or index sort key. */
@@ -218,6 +268,8 @@ export interface Query {
     items<T>(options?: PageOptions): AsyncIterable<T>;
     /** Executes the query and resolves all matching records. */
     toPromise<T>(): PromiseFinal<T>;
+    /** Executes the query and returns its value with DynamoDB request metadata. */
+    toResponse<T>(): PromiseFinal<DynamoResponse<T>>;
 }
 
 /** Comparisons supported for a declared query sort key. */
@@ -240,6 +292,14 @@ export interface QuerySortKeyComparison {
 
 /** Fluent operations available after selecting a secondary index. */
 export interface SubQuery {
+    /** Requests a strongly consistent local-index read. */
+    consistent(): SubQuery;
+    /** Returns query results in ascending sort-key order. */
+    ascending(): SubQuery;
+    /** Returns query results in descending sort-key order. */
+    descending(): SubQuery;
+    /** Requests consumed-capacity metadata in toResponse(). */
+    returnCapacity(mode?: ReturnConsumedCapacity): SubQuery;
     /** Adds a post-read filter. */
     where(attribute: string): QueryScanWhereSubQuery;
     /** Restricts returned records to the selected attributes. */
@@ -254,12 +314,20 @@ export interface SubQuery {
     items<T>(options?: PageOptions): AsyncIterable<T>;
     /** Executes the indexed query and resolves all matching records. */
     toPromise<T>(): PromiseFinal<T>;
+    /** Executes the query and returns its value with DynamoDB request metadata. */
+    toResponse<T>(): PromiseFinal<DynamoResponse<T>>;
 }
 
 /** Fluent operations for a DynamoDB scan. */
 export interface Scan {
     /** Sets the DynamoDB page size and optional all-page hard limit. */
     limit(chunkSize: number, hardLimit: number | null): Scan;
+    /** Requests a strongly consistent scan. */
+    consistent(): Scan;
+    /** Configures one segment of a parallel scan. */
+    parallel(segment: number, totalSegments: number): Scan;
+    /** Requests consumed-capacity metadata in toResponse(). */
+    returnCapacity(mode?: ReturnConsumedCapacity): Scan;
     /** Adds a post-read filter. */
     where(attribute: string): QueryScanWhereSubQuery;
     /** Restricts returned records to the selected attributes. */
@@ -274,6 +342,8 @@ export interface Scan {
     items<T>(options?: PageOptions): AsyncIterable<T>;
     /** Executes the scan and resolves all matching records. */
     toPromise<T>(): PromiseFinal<T>;
+    /** Executes the scan and returns its value with DynamoDB request metadata. */
+    toResponse<T>(): PromiseFinal<DynamoResponse<T>>;
 }
 
 /** Comparison methods available while building a query or scan filter. */
@@ -306,12 +376,16 @@ export interface QueryScanWhereSubQuery extends QueryScanWhereNotSubQuery {
 export interface Final {
     /** Executes the configured read or write operation. */
     toPromise<T>(): PromiseFinal<T>;
+    /** Executes the operation and returns its value with DynamoDB request metadata. */
+    toResponse<T>(): PromiseFinal<DynamoResponse<T>>;
 }
 
 /** Terminal operation for a count-only read. */
 export interface CountFinal {
     /** Executes the count and returns the number of matching records. */
     toPromise(): PromiseFinal<number>;
+    /** Executes the count and returns it with DynamoDB request metadata. */
+    toResponse(): PromiseFinal<DynamoResponse<number>>;
 }
 
 /** Comparison methods available while building an update condition. */
@@ -362,8 +436,14 @@ export interface UpdateSubQuery extends ConditionFailureReturnQuery<UpdateSubQue
     where(key: string): UpdateNotWhereQuery;
     /** Returns the updated item in the successful result. */
     returningAllNew(): UpdateSubQuery;
+    /** Returns the previous item in the successful result. */
+    returningAllOld(): UpdateSubQuery;
     /** Omits the updated item from the successful result. */
     returningNone(): UpdateSubQuery;
+    /** Requests consumed-capacity metadata in toResponse(). */
+    returnCapacity(mode?: ReturnConsumedCapacity): UpdateSubQuery;
+    /** Requests local-secondary-index item-collection metrics in toResponse(). */
+    returnItemCollectionMetrics(): UpdateSubQuery;
     /** Begins a single-attribute SET update. */
     set(attribute: string): UpdateEqQuery;
     /** Removes an attribute from the item. */
@@ -374,6 +454,8 @@ export interface UpdateSubQuery extends ConditionFailureReturnQuery<UpdateSubQue
     delete(attribute: string): DeleteSubQuery;
     /** Executes the update and returns the SDK result payload. */
     toPromise<T>(): PromiseFinal<T>;
+    /** Executes the update and returns its value with DynamoDB request metadata. */
+    toResponse<T>(): PromiseFinal<DynamoResponse<T>>;
     /** Executes the update and converts a conditional failure into `null`. */
     toPromiseOrNull<T>(): PromiseFinal<T | null>;
 }

@@ -1,7 +1,13 @@
 import type {DynamoDBClient, TransactWriteItemsCommandOutput} from '@aws-sdk/client-dynamodb';
 import {z} from 'zod';
 import {QueryBuilder} from './query-builder';
-import type {BatchOptions, ConditionalWriteResult, ConditionFailureReturnOptions, IndexKind, PageOptions, QueryPage} from './types';
+/** Fluent modifiers for a typed point read. */
+export interface TypedGetChain<TRecord, TResult> extends TypedFinal<TResult> {
+    consistent(): TypedGetChain<TRecord, TResult>;
+    returnCapacity(mode?: ReturnConsumedCapacity): TypedGetChain<TRecord, TResult>;
+    select<TKey extends RecordKey<TRecord>>(...attributes: TKey[]): TypedGetChain<Pick<TRecord, TKey>, Pick<TRecord, TKey> | null>;
+}
+import type {BatchGetOptions, BatchWriteOptions, ConditionalWriteResult, ConditionFailureReturnOptions, DynamoResponse, IndexKind, PageOptions, QueryPage, ReturnConsumedCapacity} from './types';
 import {TransactionWriteBuilder} from './transaction-write-builder';
 import type {TransactionItemOptions} from './transaction-write-builder';
 
@@ -50,6 +56,19 @@ type ComparisonValue<T> = T extends Set<infer TValue>
 export interface TypedFinal<TResult> {
     /** Executes the typed operation and validates its result against the table schema. */
     toPromise(): Promise<TResult>;
+    /** Executes the typed operation and returns DynamoDB response metadata. */
+    toResponse(): Promise<DynamoResponse<TResult>>;
+    
+}
+
+/** Fluent modifiers available for a typed point read. */
+export interface TypedGetChain<TRecord, TResult = TRecord | null> extends TypedFinal<TResult> {
+    /** Requests a strongly consistent read. */
+    consistent(): TypedGetChain<TRecord, TResult>;
+    /** Requests consumed-capacity metadata in toResponse(). */
+    returnCapacity(mode?: ReturnConsumedCapacity): TypedGetChain<TRecord, TResult>;
+    /** Projects and validates selected fields. */
+    select<TKey extends RecordKey<TRecord>>(...attributes: TKey[]): TypedGetChain<TRecord, Pick<TRecord, TKey> | null>;
 }
 
 /** Adds typed conditional-write result handling to a write chain. */
@@ -64,6 +83,12 @@ export interface TypedCreateChain<TRecord> extends TypedWriteFinal<TRecord, TRec
     where<TKey extends RecordKey<TRecord>>(key: TKey): TypedConditionalComparison<TRecord[TKey], TypedCreateChain<TRecord>>;
     /** Chooses whether a failed condition returns the previous record. */
     onConditionFailure(): ConditionFailureReturnOptions<TypedCreateChain<TRecord>>;
+    /** Returns the item replaced by a successful put, if present. */
+    returningAllOld(): TypedCreateChain<TRecord>;
+    /** Requests consumed-capacity metadata in toResponse(). */
+    returnCapacity(mode?: ReturnConsumedCapacity): TypedCreateChain<TRecord>;
+    /** Requests local-secondary-index item-collection metrics in toResponse(). */
+    returnItemCollectionMetrics(): TypedCreateChain<TRecord>;
 }
 
 /** Type-safe comparison operators for a record field. */
@@ -110,6 +135,10 @@ export interface TypedConditionChain<TRecord, TResult> extends TypedFinal<TResul
 
 /** Shared typed read modifiers and terminal operations. */
 export interface TypedReadChain<TRecord, TResult = TRecord, TSelectable = TResult> extends TypedFinal<TResult[]> {
+    /** Requests a strongly consistent table or local-index read. */
+    consistent(): TypedReadChain<TRecord, TResult, TSelectable>;
+    /** Requests consumed-capacity metadata in toResponse(). */
+    returnCapacity(mode?: ReturnConsumedCapacity): TypedReadChain<TRecord, TResult, TSelectable>;
     /** Adds a schema-validated post-read filter. */
     where<TKey extends RecordKey<TRecord>>(key: TKey): TypedFilterComparison<TRecord[TKey], TypedReadChain<TRecord, TResult, TSelectable>>;
     /** Projects and type-checks only the selected fields. */
@@ -128,6 +157,14 @@ export interface TypedReadChain<TRecord, TResult = TRecord, TSelectable = TResul
 export interface TypedQueryChain<TRecord, TResult = TRecord, TSelectable = TResult> extends TypedReadChain<TRecord, TResult, TSelectable> {
     /** Sets the DynamoDB page size and optional all-page hard limit. */
     limit(chunkSize: number, hardLimit?: number | null): TypedQueryChain<TRecord, TResult, TSelectable>;
+    /** Requests a strongly consistent table or local-index read. */
+    consistent(): TypedQueryChain<TRecord, TResult, TSelectable>;
+    /** Requests consumed-capacity metadata in toResponse(). */
+    returnCapacity(mode?: ReturnConsumedCapacity): TypedQueryChain<TRecord, TResult, TSelectable>;
+    /** Returns results in ascending sort-key order. */
+    ascending(): TypedQueryChain<TRecord, TResult, TSelectable>;
+    /** Returns results in descending sort-key order. */
+    descending(): TypedQueryChain<TRecord, TResult, TSelectable>;
     /** Projects and type-checks only the selected fields. */
     select<TKey extends RecordKey<TSelectable>>(...attributes: TKey[]): TypedQueryChain<TRecord, Pick<TSelectable, TKey>, Pick<TSelectable, TKey>>;
 }
@@ -161,8 +198,8 @@ type TypedKeyQueryChain<TRecord, TKey extends KeyDefinition<TRecord>> = TKey ext
     : TypedQueryChain<TRecord>;
 
 export interface TypedIndexQuery<TRecord, TKey extends KeyDefinition<TRecord>> {
-    /** Queries the index partition key and optionally requests a consistent read. */
-    query(document: PartitionKeyDocument<TRecord, TKey>, consistentRead?: boolean): TypedKeyQueryChain<TRecord, TKey>;
+    /** Queries the index partition key. */
+    query(document: PartitionKeyDocument<TRecord, TKey>): TypedKeyQueryChain<TRecord, TKey>;
 }
 
 type TypedProjectedIndexQueryChain<
@@ -183,16 +220,19 @@ export interface TypedProjectedIndexQuery<
     TIndex extends IndexDefinition<TRecord>
 > {
     /** Queries the index partition key with projection-aware result types. */
-    query(
-        document: PartitionKeyDocument<TRecord, TIndex>,
-        consistentRead?: boolean
-    ): TypedProjectedIndexQueryChain<TRecord, TTableKey, TIndex>;
+    query(document: PartitionKeyDocument<TRecord, TIndex>): TypedProjectedIndexQueryChain<TRecord, TTableKey, TIndex>;
 }
 
 /** Typed scan modifiers. */
 export interface TypedScanChain<TRecord, TResult = TRecord> extends TypedReadChain<TRecord, TResult> {
     /** Sets the DynamoDB page size and optional all-page hard limit. */
     limit(chunkSize: number, hardLimit?: number | null): TypedScanChain<TRecord, TResult>;
+    /** Requests a strongly consistent scan. */
+    consistent(): TypedScanChain<TRecord, TResult>;
+    /** Requests consumed-capacity metadata in toResponse(). */
+    returnCapacity(mode?: ReturnConsumedCapacity): TypedScanChain<TRecord, TResult>;
+    /** Configures one segment of a parallel scan. */
+    parallel(segment: number, totalSegments: number): TypedScanChain<TRecord, TResult>;
     /** Projects and type-checks only the selected fields. */
     select<TKey extends RecordKey<TResult>>(...attributes: TKey[]): TypedScanChain<TRecord, Pick<TResult, TKey>>;
 }
@@ -207,6 +247,10 @@ export interface TypedDeleteChain<TRecord, TResult = TRecord | null> extends Typ
     returningAllOld(): TypedDeleteChain<TRecord, TRecord | null>;
     /** Omits the deleted record from the successful result. */
     returningNone(): TypedDeleteChain<TRecord, void>;
+    /** Requests consumed-capacity metadata in toResponse(). */
+    returnCapacity(mode?: ReturnConsumedCapacity): TypedDeleteChain<TRecord, TResult>;
+    /** Requests local-secondary-index item-collection metrics in toResponse(). */
+    returnItemCollectionMetrics(): TypedDeleteChain<TRecord, TResult>;
 }
 
 /** Fluent chain for updating a typed record. */
@@ -217,8 +261,14 @@ export interface TypedUpdateChain<TRecord, TResult = TRecord | null> extends Typ
     where<TKey extends RecordKey<TRecord>>(key: TKey): TypedConditionalComparison<TRecord[TKey], TypedUpdateChain<TRecord, TResult>>;
     /** Returns the updated record in the successful result. */
     returningAllNew(): TypedUpdateChain<TRecord, TRecord | null>;
+    /** Returns the previous item in the successful result. */
+    returningAllOld(): TypedUpdateChain<TRecord, TRecord | null>;
     /** Omits the updated record from the successful result. */
     returningNone(): TypedUpdateChain<TRecord, void>;
+    /** Requests consumed-capacity metadata in toResponse(). */
+    returnCapacity(mode?: ReturnConsumedCapacity): TypedUpdateChain<TRecord, TResult>;
+    /** Requests local-secondary-index item-collection metrics in toResponse(). */
+    returnItemCollectionMetrics(): TypedUpdateChain<TRecord, TResult>;
     /** Begins a type-checked SET update. */
     set<TKey extends RecordKey<TRecord>>(attribute: TKey): {eq(value: TRecord[TKey]): TypedUpdateChain<TRecord, TResult>};
     /** Removes an attribute from the record. */
@@ -500,19 +550,19 @@ export class TypedTableQuery<
     }
 
     /** Creates records in bounded batches and validates the returned records. */
-    createBatch(documents: InputOf<TSchema>[], options: BatchOptions | boolean = {}): Promise<RecordOf<TSchema>[]> {
+    createBatch(documents: InputOf<TSchema>[], options: BatchWriteOptions | boolean = {}): Promise<RecordOf<TSchema>[]> {
         return this.builder().createBatch<RecordOf<TSchema>>(documents as AnyRecord[], options);
     }
 
     /** Reads one record by its complete primary key. */
-    get(key: KeyDocument<RecordOf<TSchema>, TKey>, consistentRead = false): TypedFinal<RecordOf<TSchema> | null> {
-        return this.final(this.builder().get(this.table.parseKey(key) as AnyRecord, consistentRead));
+    get(key: KeyDocument<RecordOf<TSchema>, TKey>): TypedGetChain<RecordOf<TSchema>> {
+        return this.getChain(this.builder().get(this.table.parseKey(key) as AnyRecord));
     }
 
     /** Reads records by primary key in bounded batches. */
-    getBatch(keys: KeyDocument<RecordOf<TSchema>, TKey>[], options: BatchOptions | boolean = {}, consistentRead = false): Promise<RecordOf<TSchema>[]> {
+    getBatch(keys: KeyDocument<RecordOf<TSchema>, TKey>[], options: BatchGetOptions | boolean = {}): Promise<RecordOf<TSchema>[]> {
         const parsedKeys = keys.map((key) => this.table.parseKey(key));
-        return this.builder().getBatch<RecordOf<TSchema>>(parsedKeys, options, consistentRead);
+        return this.builder().getBatch<RecordOf<TSchema>>(parsedKeys, options);
     }
 
     /** Deletes one record by its complete primary key. */
@@ -526,7 +576,7 @@ export class TypedTableQuery<
     }
 
     /** Deletes records by primary key in bounded batches. */
-    deleteBatch(keys: KeyDocument<RecordOf<TSchema>, TKey>[], options: BatchOptions | boolean = {}): Promise<void> {
+    deleteBatch(keys: KeyDocument<RecordOf<TSchema>, TKey>[], options: BatchWriteOptions | boolean = {}): Promise<void> {
         const parsedKeys = keys.map((key) => this.table.parseKey(key));
         return this.builder().deleteBatch(parsedKeys, options);
     }
@@ -537,8 +587,8 @@ export class TypedTableQuery<
     }
 
     /** Queries the table partition key and exposes typed sort-key comparisons when declared. */
-    query(document: PartitionKeyDocument<RecordOf<TSchema>, TKey>, consistentRead = false): TypedKeyQueryChain<RecordOf<TSchema>, TKey> {
-        const query = this.builder().query(this.table.parsePartitionKey(document) as AnyRecord, consistentRead);
+    query(document: PartitionKeyDocument<RecordOf<TSchema>, TKey>): TypedKeyQueryChain<RecordOf<TSchema>, TKey> {
+        const query = this.builder().query(this.table.parsePartitionKey(document) as AnyRecord);
         return this.keyQueryChain(query, this.table.key) as TypedKeyQueryChain<RecordOf<TSchema>, TKey>;
     }
 
@@ -547,9 +597,9 @@ export class TypedTableQuery<
         index: TName
     ): TypedProjectedIndexQuery<RecordOf<TSchema>, TKey, TIndexes[TName]> {
         return {
-            query: (document, consistentRead = false) => {
+            query: (document) => {
                 const definition = this.table.indexes[index];
-                const query = this.builder(index).query(this.table.parseIndexKey(index, document) as AnyRecord, consistentRead);
+                const query = this.builder(index).query(this.table.parseIndexKey(index, document) as AnyRecord);
                 query.usingIndex(index, definition.kind);
                 return this.keyQueryChain(query, definition) as any;
             }
@@ -557,8 +607,8 @@ export class TypedTableQuery<
     }
 
     /** Scans the table with schema validation and typed projections. */
-    scan(consistentRead = false): TypedScanChain<RecordOf<TSchema>> {
-        return this.scanChain(this.builder().scan(consistentRead));
+    scan(): TypedScanChain<RecordOf<TSchema>> {
+        return this.scanChain(this.builder().scan());
     }
 
     private builder(index: Extract<keyof TIndexes, string> | null = null): QueryBuilder {
@@ -576,12 +626,28 @@ export class TypedTableQuery<
     }
 
     private final<TResult>(query: any): TypedFinal<TResult> {
-        return {toPromise: () => query.toPromise() as Promise<TResult>};
+        return {
+            toPromise: () => query.toPromise() as Promise<TResult>,
+            toResponse: () => query.toResponse() as Promise<DynamoResponse<TResult>>
+        };
+    }
+
+    private getChain<TResult = RecordOf<TSchema> | null>(query: any): TypedGetChain<RecordOf<TSchema>, TResult> {
+        return {
+            ...this.final<TResult>(query),
+            consistent: () => this.getChain<TResult>(query.consistent()),
+            returnCapacity: (mode) => this.getChain<TResult>(query.returnCapacity(mode)),
+            select: (...attributes) => {
+                attributes.forEach((attribute) => this.table.assertField(attribute));
+                return this.getChain<Pick<RecordOf<TSchema>, typeof attributes[number]> | null>(query.select(...attributes));
+            }
+        };
     }
 
     private writeFinal<TResult>(query: any): TypedWriteFinal<RecordOf<TSchema>, TResult> {
         return {
             ...this.final<TResult>(query),
+            toResponse: () => query.toResponse() as Promise<DynamoResponse<TResult>>,
             toResult: () => {
                 if (this.transactionBuilder !== null) {
                     throw new Error('Execute typed transactions through the transaction builder');
@@ -610,15 +676,18 @@ export class TypedTableQuery<
         return {
             ...this.writeFinal<RecordOf<TSchema>>(query),
             where: (key) => this.conditionalComparison(query.where(key), key, (next) => this.createChain(next)),
-            onConditionFailure: () => this.conditionFailureOptions(query, (next) => this.createChain(next))
+            onConditionFailure: () => this.conditionFailureOptions(query, (next) => this.createChain(next)),
+            returningAllOld: () => this.createChain(query.returningAllOld()),
+            returnCapacity: (mode) => this.createChain(query.returnCapacity(mode)),
+            returnItemCollectionMetrics: () => this.createChain(query.returnItemCollectionMetrics())
         };
     }
 
     private conditionChain<TResult>(query: any): TypedConditionChain<RecordOf<TSchema>, TResult> {
         return {
+            ...this.final<TResult>(query),
             where: (key) => this.conditionalComparison(query.where(key), key, (next) => this.conditionChain(next)),
-            onConditionFailure: () => this.conditionFailureOptions(query, (next) => this.conditionChain<TResult>(next)),
-            toPromise: () => query.toPromise() as Promise<TResult>
+            onConditionFailure: () => this.conditionFailureOptions(query, (next) => this.conditionChain<TResult>(next))
         };
     }
 
@@ -628,7 +697,9 @@ export class TypedTableQuery<
             onConditionFailure: () => this.conditionFailureOptions(query, (next) => this.deleteChain<TResult>(next)),
             where: (key) => this.conditionalComparison(query.where(key), key, (next) => this.deleteChain<TResult>(next)),
             returningAllOld: () => this.deleteChain<RecordOf<TSchema> | null>(query.returningAllOld()),
-            returningNone: () => this.deleteChain<void>(query.returningNone())
+            returningNone: () => this.deleteChain<void>(query.returningNone()),
+            returnCapacity: (mode) => this.deleteChain<TResult>(query.returnCapacity(mode)),
+            returnItemCollectionMetrics: () => this.deleteChain<TResult>(query.returnItemCollectionMetrics())
         };
     }
 
@@ -637,6 +708,9 @@ export class TypedTableQuery<
         TSelectable = TResult
     >(query: any): TypedReadChain<RecordOf<TSchema>, TResult, TSelectable> {
         return {
+            ...this.final<TResult[]>(query),
+            consistent: () => this.readChain<TResult, TSelectable>(query.consistent()),
+            returnCapacity: (mode) => this.readChain<TResult, TSelectable>(query.returnCapacity(mode)),
             where: (key) => this.filterComparison(query.where(key), key, (next) => this.readChain<TResult, TSelectable>(next)),
             select: (...attributes) => {
                 attributes.forEach((attribute) => this.table.assertField(attribute));
@@ -655,7 +729,12 @@ export class TypedTableQuery<
         TSelectable = TResult
     >(query: any): TypedQueryChain<RecordOf<TSchema>, TResult, TSelectable> {
         return {
+            ...this.final<TResult[]>(query),
             limit: (chunkSize, hardLimit = null) => this.queryChain<TResult, TSelectable>(query.limit(chunkSize, hardLimit)),
+            consistent: () => this.queryChain<TResult, TSelectable>(query.consistent()),
+            returnCapacity: (mode) => this.queryChain<TResult, TSelectable>(query.returnCapacity(mode)),
+            ascending: () => this.queryChain<TResult, TSelectable>(query.ascending()),
+            descending: () => this.queryChain<TResult, TSelectable>(query.descending()),
             where: (key) => this.filterComparison(query.where(key), key, (next) => this.readChain<TResult, TSelectable>(next)),
             select: (...attributes) => {
                 attributes.forEach((attribute) => this.table.assertField(attribute));
@@ -705,7 +784,11 @@ export class TypedTableQuery<
 
     private scanChain<TResult = RecordOf<TSchema>>(query: any): TypedScanChain<RecordOf<TSchema>, TResult> {
         return {
+            ...this.final<TResult[]>(query),
             limit: (chunkSize, hardLimit = null) => this.scanChain<TResult>(query.limit(chunkSize, hardLimit)),
+            consistent: () => this.scanChain<TResult>(query.consistent()),
+            returnCapacity: (mode) => this.scanChain<TResult>(query.returnCapacity(mode)),
+            parallel: (segment, totalSegments) => this.scanChain<TResult>(query.parallel(segment, totalSegments)),
             where: (key) => this.filterComparison(query.where(key), key, (next) => this.readChain<TResult>(next)),
             select: (...attributes) => {
                 attributes.forEach((attribute) => this.table.assertField(attribute));
@@ -738,7 +821,10 @@ export class TypedTableQuery<
             onConditionFailure: () => this.conditionFailureOptions(query, (next) => this.updateChain<TResult>(next)),
             where: (key) => this.conditionalComparison(query.where(key), key, (next) => this.updateChain<TResult>(next)),
             returningAllNew: () => this.updateChain<RecordOf<TSchema> | null>(query.returningAllNew()),
+            returningAllOld: () => this.updateChain<RecordOf<TSchema> | null>(query.returningAllOld()),
             returningNone: () => this.updateChain<void>(query.returningNone()),
+            returnCapacity: (mode) => this.updateChain<TResult>(query.returnCapacity(mode)),
+            returnItemCollectionMetrics: () => this.updateChain<TResult>(query.returnItemCollectionMetrics()),
             set: (attribute) => ({eq: (value) => this.updateChain<TResult>(query.set(attribute).eq(this.table.parseField(attribute, value)))}),
             remove: (attribute) => {
                 this.table.assertField(attribute);
@@ -783,6 +869,14 @@ export class TypedTableQuery<
     }
 }
 
+export interface TypedTableQuery<
+    TSchema extends RecordSchema,
+    TKey extends KeyDefinition<RecordOf<TSchema>>,
+    TIndexes extends IndexDefinitions<RecordOf<TSchema>>
+> {
+    get(key: KeyDocument<RecordOf<TSchema>, TKey>, consistentRead?: boolean): TypedGetChain<RecordOf<TSchema>, RecordOf<TSchema> | null>;
+}
+
 /** Schema-aware transaction builder for atomic operations across typed tables. */
 export class TypedTransactionWriteBuilder {
     private transaction: TransactionWriteBuilder;
@@ -819,6 +913,18 @@ export class TypedTransactionWriteBuilder {
     /** Enables or disables request logging for the transaction. */
     logger(logger: null | ((message: any) => void) = null): TypedTransactionWriteBuilder {
         this.transaction.logger(logger);
+        return this;
+    }
+
+    /** Requests consumed-capacity metadata in the transaction response. */
+    returnCapacity(mode: ReturnConsumedCapacity = 'INDEXES'): TypedTransactionWriteBuilder {
+        this.transaction.returnCapacity(mode);
+        return this;
+    }
+
+    /** Requests local-secondary-index item-collection metrics in the transaction response. */
+    returnItemCollectionMetrics(): TypedTransactionWriteBuilder {
+        this.transaction.returnItemCollectionMetrics();
         return this;
     }
 

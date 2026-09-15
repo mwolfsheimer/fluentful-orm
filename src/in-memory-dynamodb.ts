@@ -26,6 +26,7 @@ import type {
     KeySchemaElement,
     PutItemCommandInput,
     QueryCommandInput,
+    ScanCommandInput,
     TableDescription,
     TransactWriteItemsCommandInput,
     UpdateItemCommandInput
@@ -310,6 +311,40 @@ export class InMemoryDynamoDB {
         }
     }
 
+    private metadata(input: {TableName?: string; ReturnConsumedCapacity?: string}): object {
+        if (input.ReturnConsumedCapacity === undefined || input.ReturnConsumedCapacity === 'NONE') {
+            return {};
+        }
+        return {ConsumedCapacity: {TableName: input.TableName, CapacityUnits: 1}};
+    }
+
+    private itemCollectionMetrics(input: WriteInput, table: MemoryTable, item: Document): object {
+        if (input.ReturnItemCollectionMetrics !== 'SIZE' || (table.description.LocalSecondaryIndexes || []).length === 0) {
+            return {};
+        }
+        const partition = (table.description.KeySchema || []).find((key) => key.KeyType === 'HASH');
+        if (partition === undefined || item[partition.AttributeName!] === undefined) {
+            return {};
+        }
+        return {ItemCollectionMetrics: [{
+            ItemCollectionKey: QuerySerializer.serialiseMap({[partition.AttributeName!]: item[partition.AttributeName!]}),
+            SizeEstimateRangeGB: [0, 0]
+        }]};
+    }
+
+    private project(item: Document, expression: string | undefined, names: Record<string, string> | undefined): Document {
+        if (expression === undefined) {
+            return item;
+        }
+        const attributes = expression.split(',').map((name) => names?.[name.trim()]);
+        if (attributes.some((attribute) => attribute === undefined)) {
+            validation('Unsupported in-memory projection');
+        }
+        return Object.fromEntries(attributes
+            .filter((attribute): attribute is string => attribute !== undefined && Object.prototype.hasOwnProperty.call(item, attribute))
+            .map((attribute) => [attribute, item[attribute]]));
+    }
+
     private write(kind: 'put' | 'update' | 'delete' | 'check', input: WriteInput): object {
         const table = this.table(input.TableName);
         const selector = QuerySerializer.parseItem<AttributeMap, unknown>(
@@ -337,9 +372,11 @@ export class InMemoryDynamoDB {
             : input.ReturnValues === 'ALL_NEW'
                 ? next
                 : undefined;
-        return returned === undefined
-            ? {}
-            : {Attributes: QuerySerializer.serialiseMap(returned)};
+        return {
+            ...(returned === undefined ? {} : {Attributes: QuerySerializer.serialiseMap(returned)}),
+            ...this.metadata(input),
+            ...this.itemCollectionMetrics(input, table, next)
+        };
     }
 
     private update(item: Document, input: WriteInput, keys: KeySchemaElement[]): void {
@@ -422,8 +459,9 @@ export class InMemoryDynamoDB {
     }
 
     // Query and scan execution.
-    private read(input: QueryCommandInput, query: boolean): object {
+    private read(input: QueryCommandInput | ScanCommandInput, query: boolean): object {
         const table = this.table(input.TableName);
+        const queryInput = input as QueryCommandInput;
         let schema = table.description.KeySchema || [];
         let projectedAttributes: Set<string> | null = null;
         let globalIndex = false;
@@ -452,19 +490,19 @@ export class InMemoryDynamoDB {
                 }
             }
         }
-        if (query && input.KeyConditionExpression === undefined) {
+        if (query && queryInput.KeyConditionExpression === undefined) {
             validation('Query requires a key condition');
         }
-        this.matches(input.KeyConditionExpression, {}, input);
+        this.matches(query ? queryInput.KeyConditionExpression : undefined, {}, input as QueryCommandInput);
         this.matches(input.FilterExpression, {}, input);
         if (query) {
-            const aliases = (input.KeyConditionExpression || '').match(/#[\w.-]+/g) || [];
+            const aliases = (queryInput.KeyConditionExpression || '').match(/#[\w.-]+/g) || [];
             const names = input.ExpressionAttributeNames || {};
             const partition = schema.find((key) => key.KeyType === 'HASH')!;
             const partitionAliases = aliases.filter((alias) => names[alias] === partition.AttributeName);
             if (
                 partitionAliases.length !== 1
-                || !(input.KeyConditionExpression || '').includes(`${partitionAliases[0]} = :`)
+                || !(queryInput.KeyConditionExpression || '').includes(`${partitionAliases[0]} = :`)
                 || aliases.some((alias) => !schema.some((key) => key.AttributeName === names[alias]))
             ) {
                 validation('Query requires partition-key equality and only declared key attributes');
@@ -503,15 +541,31 @@ export class InMemoryDynamoDB {
         }
         let items = Array.from(table.items.values()).filter(
             (item) => schema.every((key) => item[key.AttributeName!] !== undefined)
-                && (!query || this.matches(input.KeyConditionExpression, item, input))
+                && (!query || this.matches(queryInput.KeyConditionExpression, item, queryInput))
         );
         if (query) {
             const sort = schema.find((key) => key.KeyType === 'RANGE');
             if (sort !== undefined) {
                 items.sort((left, right) => compare(left[sort.AttributeName!], right[sort.AttributeName!]) || 0);
             }
-            if (input.ScanIndexForward === false) {
+            if (queryInput.ScanIndexForward === false) {
                 items.reverse();
+            }
+        }
+        if (!query) {
+            const scan = input as ScanCommandInput;
+            if ((scan.Segment === undefined) !== (scan.TotalSegments === undefined)
+                || (scan.TotalSegments !== undefined && (!Number.isInteger(scan.TotalSegments) || scan.TotalSegments < 1
+                    || !Number.isInteger(scan.Segment) || scan.Segment! < 0 || scan.Segment! >= scan.TotalSegments))) {
+                validation('Invalid parallel scan segment');
+            }
+            if (scan.Segment !== undefined) {
+                items = items.filter((item) => {
+                    const key = this.key(table, item);
+                    let hash = 0;
+                    for (let index = 0; index < key.length; index++) hash = (hash * 31 + key.charCodeAt(index)) >>> 0;
+                    return hash % scan.TotalSegments! === scan.Segment;
+                });
             }
         }
         if (input.ExclusiveStartKey !== undefined) {
@@ -539,6 +593,7 @@ export class InMemoryDynamoDB {
             );
         }
         return {
+            ...this.metadata(input),
             Items: input.Select === 'COUNT'
                 ? undefined
                 : filtered.map((item) => {
@@ -725,7 +780,14 @@ export class InMemoryDynamoDB {
             const item = table.items.get(
                 this.key(table, QuerySerializer.parseItem(command.input.Key!), true)
             );
-            return item === undefined ? {} : {Item: QuerySerializer.serialiseMap(item)};
+            return {
+                ...this.metadata(command.input),
+                ...(item === undefined ? {} : {Item: QuerySerializer.serialiseMap(this.project(
+                    item,
+                    command.input.ProjectionExpression,
+                    command.input.ExpressionAttributeNames
+                ))})
+            };
         }
         if (command instanceof PutItemCommand) {
             return this.write('put', command.input);
@@ -757,7 +819,10 @@ export class InMemoryDynamoDB {
                     }
                 }
             }
-            return {UnprocessedItems: {}};
+            return {
+                ...this.metadata({ReturnConsumedCapacity: command.input.ReturnConsumedCapacity}),
+                UnprocessedItems: {}
+            };
         }
         if (command instanceof BatchGetItemCommand) {
             const responses: Record<string, AttributeMap[]> = {};
@@ -767,10 +832,18 @@ export class InMemoryDynamoDB {
                     const item = table.items.get(
                         this.key(table, QuerySerializer.parseItem(key), true)
                     );
-                    return item === undefined ? [] : [QuerySerializer.serialiseMap(item)];
+                    return item === undefined ? [] : [QuerySerializer.serialiseMap(this.project(
+                        item,
+                        request.ProjectionExpression,
+                        request.ExpressionAttributeNames
+                    ))];
                 });
             }
-            return {Responses: responses, UnprocessedKeys: {}};
+            return {
+                ...this.metadata({ReturnConsumedCapacity: command.input.ReturnConsumedCapacity}),
+                Responses: responses,
+                UnprocessedKeys: {}
+            };
         }
         throw new Error(`Unsupported in-memory DynamoDB command: ${commandName}`);
     }

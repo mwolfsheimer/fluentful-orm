@@ -2,6 +2,7 @@ export {Quewe} from "./quewe";
 export {QueryBuilder, defineTable, createTable, deleteTable, describeTable, getTableDefinition, listTables, transactWrite} from "./query-builder";
 export {QuerySerializer} from "./query-serializer";
 export {ValueUtils} from './value-utils';
+export type {DynamoResponse, ReturnConsumedCapacity, BatchGetOptions, BatchWriteOptions} from './types';
 export {createInMemoryDynamoDB, InMemoryDynamoDB} from './in-memory-dynamodb';
 export {TransactionWriteBuilder} from "./transaction-write-builder";
 export type {TransactionItemOptions} from "./transaction-write-builder";
@@ -34,6 +35,7 @@ export type {
 	TypedCompositeQueryChain,
 	TypedDeleteChain,
 	TypedFinal,
+	TypedGetChain,
 	TypedIndexQuery,
 	TypedProjectedIndexQuery,
 	TypedQueryChain,

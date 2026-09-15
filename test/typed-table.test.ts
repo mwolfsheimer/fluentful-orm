@@ -1,8 +1,44 @@
 import assert from 'node:assert/strict';
 import {describe, test} from 'node:test';
 import {ConditionalCheckFailedException} from '@aws-sdk/client-dynamodb';
-import type {ConditionalWriteResult} from '../src/index';
+import type {ConditionalWriteResult, DynamoResponse} from '../src/index';
 import {z} from 'zod';
+
+test('exposes typed fluent request options and metadata responses', async () => {
+    const fake = createFakeDynamoDB((command) => {
+        if (command.input.Item) {
+            return {
+                Attributes: QuerySerializer.serialiseMap({id: 'item', category: 'news', value: 1}),
+                ConsumedCapacity: {TableName: 'typed-records', CapacityUnits: 1}
+            };
+        }
+        return {Items: [], ConsumedCapacity: {TableName: 'typed-records', CapacityUnits: 1}};
+    });
+    const records = createTestTable().using(fake.db);
+
+    const response = await records
+        .query({id: 'item'})
+        .descending()
+        .returnCapacity('TOTAL')
+        .toResponse();
+    const previous = await records
+        .create({id: 'item', category: 'news', value: 2})
+        .returningAllOld()
+        .returnItemCollectionMetrics()
+        .toPromise();
+    await records.scan().parallel(0, 2).consistent().toPromise();
+
+    assert.deepEqual(response.value, []);
+    assert.equal(response.consumedCapacity.length, 1);
+    assert.deepEqual(previous, {id: 'item', category: 'news', value: 1});
+    assert.equal(fake.inputs[0].ScanIndexForward, false);
+    assert.equal(fake.inputs[0].ReturnConsumedCapacity, 'TOTAL');
+    assert.equal(fake.inputs[1].ReturnValues, 'ALL_OLD');
+    assert.equal(fake.inputs[1].ReturnItemCollectionMetrics, 'SIZE');
+    assert.equal(fake.inputs[2].Segment, 0);
+    assert.equal(fake.inputs[2].TotalSegments, 2);
+    assert.equal(fake.inputs[2].ConsistentRead, true);
+});
 import {QuerySerializer} from '../src/query-serializer';
 import {defineTable, typedTransaction} from '../src/typed-table';
 import {createFakeDynamoDB} from './fake-dynamodb';
@@ -297,14 +333,53 @@ describe('query - TypedTable', () => {
         const records = table.using(fake.db);
 
         assert.throws(
-            () => records.index('globalCategory').query({category: 'news'}, true),
+            () => records.index('globalCategory').query({category: 'news'}).consistent(),
             /Global secondary index globalCategory does not support consistent reads/
         );
-        await records.index('localCategory').query({category: 'news'}, true).toPromise();
+        await records.index('localCategory').query({category: 'news'}).consistent().toPromise();
 
         assert.equal(fake.inputs.length, 1);
         assert.equal(fake.inputs[0].IndexName, 'localCategory');
         assert.equal(fake.inputs[0].ConsistentRead, true);
+    });
+
+    test('forwards typed fluent metadata, projection, ordering, and scan modifiers', async () => {
+        const record = {id: 'typed-options', category: 'news', value: 1};
+        const capacity = {TableName: 'typed-records', CapacityUnits: 1};
+        const fake = createFakeDynamoDB((command) => {
+            if (command.input.Key) {
+                return {Item: QuerySerializer.serialiseMap({id: record.id}), ConsumedCapacity: capacity};
+            }
+            if (command.input.UpdateExpression) {
+                return {Attributes: QuerySerializer.serialiseMap(record), ConsumedCapacity: capacity};
+            }
+            return {Items: [], ConsumedCapacity: capacity};
+        });
+        const records = createTestTable().using(fake.db);
+
+        const response: Promise<DynamoResponse<Pick<TestRecord, 'id'> | null>> = records
+            .get({id: record.id})
+            .consistent()
+            .select('id')
+            .returnCapacity('TOTAL')
+            .toResponse();
+        assert.deepEqual((await response).value, {id: record.id});
+
+        await records.query({id: record.id}).descending().returnCapacity().toResponse();
+        await records.scan().consistent().parallel(0, 2).returnCapacity('NONE').toResponse();
+        await records.update({id: record.id})
+            .set('value').eq(1)
+            .returningAllOld()
+            .returnItemCollectionMetrics()
+            .toResponse();
+
+        assert.equal(fake.inputs[0].ConsistentRead, true);
+        assert.equal(fake.inputs[0].ProjectionExpression, '#id');
+        assert.equal(fake.inputs[1].ScanIndexForward, false);
+        assert.equal(fake.inputs[2].Segment, 0);
+        assert.equal(fake.inputs[2].TotalSegments, 2);
+        assert.equal(fake.inputs[3].ReturnValues, 'ALL_OLD');
+        assert.equal(fake.inputs[3].ReturnItemCollectionMetrics, 'SIZE');
     });
 
     test('types and validates projected arrays, pages, iterators, and counts', async () => {

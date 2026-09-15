@@ -6,6 +6,112 @@ import {QuerySerializer} from '../src/query-serializer';
 import {createFakeDynamoDB} from './fake-dynamodb';
 import {z} from 'zod';
 
+test('configures fluent DynamoDB request options and returns response metadata', async () => {
+    const capacity = {TableName: 'test', CapacityUnits: 2};
+    const metrics = {ItemCollectionKey: QuerySerializer.serialiseMap({id: 'item'}), SizeEstimateRangeGB: [0.01, 0.02]};
+    const fake = createFakeDynamoDB((command) => {
+        if (command.input.Key) {
+            return {Item: QuerySerializer.serialiseMap({id: 'item', value: 1}), ConsumedCapacity: capacity};
+        }
+        if (command.input.Item) {
+            return {Attributes: QuerySerializer.serialiseMap({id: 'previous', value: 0}), ConsumedCapacity: capacity, ItemCollectionMetrics: metrics};
+        }
+        return {Items: [], ConsumedCapacity: capacity};
+    });
+
+    const get = await new QueryBuilder('test', fake.db)
+        .get({id: 'item'})
+        .consistent()
+        .select('id')
+        .returnCapacity('TOTAL')
+        .toResponse<{id: string} | null>();
+    const create = await new QueryBuilder('test', fake.db)
+        .create({id: 'item', value: 1})
+        .returningAllOld()
+        .returnItemCollectionMetrics()
+        .toResponse<{id: string; value: number} | null>();
+    await new QueryBuilder('test', fake.db)
+        .query({id: 'item'})
+        .descending()
+        .returnCapacity()
+        .toPromise();
+    await new QueryBuilder('test', fake.db)
+        .scan()
+        .parallel(1, 3)
+        .consistent()
+        .toPromise();
+
+    assert.deepEqual(get.value, {id: 'item'});
+    assert.deepEqual(get.consumedCapacity, [capacity]);
+    assert.deepEqual(create.value, {id: 'previous', value: 0});
+    assert.deepEqual(create.itemCollectionMetrics, [metrics]);
+    assert.equal(fake.inputs[0].ConsistentRead, true);
+    assert.equal(fake.inputs[0].ProjectionExpression, '#id');
+    assert.equal(fake.inputs[0].ReturnConsumedCapacity, 'TOTAL');
+    assert.equal(fake.inputs[1].ReturnValues, 'ALL_OLD');
+    assert.equal(fake.inputs[1].ReturnItemCollectionMetrics, 'SIZE');
+    assert.equal(fake.inputs[2].ScanIndexForward, false);
+    assert.equal(fake.inputs[3].Segment, 1);
+    assert.equal(fake.inputs[3].TotalSegments, 3);
+});
+
+test('returns previous records for successful create and update operations', async () => {
+    const previous = {id: 'item', value: 1};
+    const fake = createFakeDynamoDB(() => ({Attributes: QuerySerializer.serialiseMap(previous)}));
+
+    const created = await new QueryBuilder('test', fake.db)
+        .create({id: 'item', value: 2})
+        .returningAllOld()
+        .toPromise<typeof previous | null>();
+    const updated = await new QueryBuilder('test', fake.db)
+        .update({id: 'item'})
+        .set('value').eq(2)
+        .returningAllOld()
+        .toPromise<typeof previous | null>();
+
+    assert.deepEqual(created, previous);
+    assert.deepEqual(updated, previous);
+    assert.equal(fake.inputs[0].ReturnValues, 'ALL_OLD');
+    assert.equal(fake.inputs[1].ReturnValues, 'ALL_OLD');
+});
+
+test('passes batch read and write request options to each chunk', async () => {
+    const fake = createFakeDynamoDB((command) => Array.isArray(command.input.RequestItems.test)
+        ? {UnprocessedItems: {}}
+        : {Responses: {test: []}, UnprocessedKeys: {}});
+
+    await new QueryBuilder('test', fake.db).getBatch([{id: 'item'}], {
+        concurrency: 1,
+        consistentRead: true,
+        select: ['id'],
+        returnConsumedCapacity: 'TOTAL'
+    });
+    await new QueryBuilder('test', fake.db).createBatch([{id: 'item'}], {
+        concurrency: 1,
+        returnConsumedCapacity: 'TOTAL',
+        returnItemCollectionMetrics: 'SIZE'
+    });
+
+    assert.equal(fake.inputs[0].ReturnConsumedCapacity, 'TOTAL');
+    assert.equal(fake.inputs[0].RequestItems.test.ConsistentRead, true);
+    assert.equal(fake.inputs[0].RequestItems.test.ProjectionExpression, '#id');
+    assert.equal(fake.inputs[1].ReturnConsumedCapacity, 'TOTAL');
+    assert.equal(fake.inputs[1].ReturnItemCollectionMetrics, 'SIZE');
+});
+
+test('passes metadata options through transaction requests', async () => {
+    const fake = createFakeDynamoDB();
+
+    await QueryBuilder.transactWrite(fake.db)
+        .returnCapacity('TOTAL')
+        .returnItemCollectionMetrics()
+        .add('test', (records) => records.create({id: 'item'}))
+        .toPromise();
+
+    assert.equal(fake.inputs[0].ReturnConsumedCapacity, 'TOTAL');
+    assert.equal(fake.inputs[0].ReturnItemCollectionMetrics, 'SIZE');
+});
+
 describe('query - QueryBuilder command construction', () => {
     test('exposes typed and administrative helpers as named exports and class statics', () => {
         const classTable = QueryBuilder.defineTable({
@@ -381,20 +487,76 @@ describe('query - QueryBuilder command construction', () => {
             return command.input.KeyConditionExpression ? {Items: []} : {};
         });
 
-        await new QueryBuilder('test', fake.db).get({id: 'consistent-get'}, true).toPromise();
+        await new QueryBuilder('test', fake.db).get({id: 'consistent-get'}).consistent().toPromise();
         assert.throws(
-            () => new QueryBuilder('test', fake.db).query({id: 'consistent-query'}, true).usingIndex('global-index'),
+            () => new QueryBuilder('test', fake.db).query({id: 'consistent-query'}).consistent().usingIndex('global-index'),
             /Global secondary index global-index does not support consistent reads/
         );
-        await new QueryBuilder('test', fake.db).query({id: 'consistent-query'}, true).usingIndex('local-index', 'local').toPromise<any[]>();
-        await new QueryBuilder('test', fake.db).getBatch<any>([{id: 'consistent-batch-get'}], false, true);
-        await new QueryBuilder('test', fake.db).scan(true).toPromise<any[]>();
+        await new QueryBuilder('test', fake.db).query({id: 'consistent-query'}).consistent().usingIndex('local-index', 'local').toPromise<any[]>();
+        await new QueryBuilder('test', fake.db).getBatch<any>([{id: 'consistent-batch-get'}], {consistentRead: true});
+        await new QueryBuilder('test', fake.db).scan().consistent().toPromise<any[]>();
 
         assert.equal(fake.inputs[0].ConsistentRead, true);
         assert.equal(fake.inputs[1].ConsistentRead, true);
         assert.equal(fake.inputs[1].IndexName, 'local-index');
         assert.equal(fake.inputs[2].RequestItems.test.ConsistentRead, true);
         assert.equal(fake.inputs[3].ConsistentRead, true);
+    });
+
+    test('forwards fluent metadata, projection, ordering, and write-return modifiers', async () => {
+        const previous = {id: 'previous', value: 1};
+        const capacity = {TableName: 'test', CapacityUnits: 0.5};
+        const metrics = [{ItemCollectionKey: QuerySerializer.serialiseMap({id: 'previous'}), SizeEstimateRangeGB: [0, 0.1]}];
+        const fake = createFakeDynamoDB((command) => {
+            if (command.input.Key) {
+                return {
+                    Item: QuerySerializer.serialiseMap(command.input.ProjectionExpression === '#id' ? {id: previous.id} : previous),
+                    ConsumedCapacity: capacity
+                };
+            }
+            if (command.input.Item) {
+                return {Attributes: QuerySerializer.serialiseMap(previous), ConsumedCapacity: capacity, ItemCollectionMetrics: metrics};
+            }
+            return {Items: [], ConsumedCapacity: capacity};
+        });
+
+        const get = new QueryBuilder('test', fake.db)
+            .get({id: previous.id})
+            .consistent()
+            .select('id')
+            .returnCapacity('TOTAL');
+        const first = get.toResponse<{id: string} | null>();
+        assert.strictEqual(first, get.toResponse());
+        assert.deepEqual(await first, {
+            value: {id: previous.id},
+            consumedCapacity: [capacity],
+            itemCollectionMetrics: []
+        });
+
+        const created = await new QueryBuilder('test', fake.db)
+            .create({id: 'replacement', value: 2})
+            .returningAllOld()
+            .returnCapacity()
+            .returnItemCollectionMetrics()
+            .toResponse<typeof previous | null>();
+        assert.equal(created.value?.id, previous.id);
+        assert.deepEqual(created.consumedCapacity, [capacity]);
+        assert.deepEqual(created.itemCollectionMetrics, metrics);
+
+        await new QueryBuilder('test', fake.db)
+            .query({id: 'ordered'})
+            .descending()
+            .returnCapacity('NONE')
+            .toResponse<any[]>();
+
+        assert.equal(fake.inputs[0].ConsistentRead, true);
+        assert.equal(fake.inputs[0].ProjectionExpression, '#id');
+        assert.equal(fake.inputs[0].ReturnConsumedCapacity, 'TOTAL');
+        assert.equal(fake.inputs[1].ReturnValues, 'ALL_OLD');
+        assert.equal(fake.inputs[1].ReturnItemCollectionMetrics, 'SIZE');
+        assert.equal(fake.inputs[2].ScanIndexForward, false);
+        assert.equal(fake.inputs[2].ReturnConsumedCapacity, 'NONE');
+        assert.equal(fake.inputs.length, 3);
     });
 
     test('returns null items and empty pages for missing AWS result fields without false result logs', async () => {

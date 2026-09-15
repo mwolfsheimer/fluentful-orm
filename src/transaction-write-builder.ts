@@ -1,6 +1,7 @@
 import {TransactWriteItemsCommand} from '@aws-sdk/client-dynamodb';
 import type {DynamoDBClient, TransactWriteItem, TransactWriteItemsCommandOutput} from '@aws-sdk/client-dynamodb';
 import type {QueryBuilder} from './query-builder';
+import type {ReturnConsumedCapacity} from './types';
 
 type QueryLogger = null | ((message: any) => void);
 
@@ -15,6 +16,8 @@ export class TransactionWriteBuilder {
     private items: TransactWriteItem[] = [];
     private requestToken: string | undefined;
     private _logger: QueryLogger = null;
+    private returnConsumedCapacity: ReturnConsumedCapacity = 'INDEXES';
+    private itemCollectionMetricsMode: 'NONE' | 'SIZE' = 'NONE';
     private executed: Promise<TransactWriteItemsCommandOutput> | null = null;
 
     constructor(
@@ -67,6 +70,18 @@ export class TransactionWriteBuilder {
         return this;
     }
 
+    /** Requests consumed-capacity metadata in the transaction response. */
+    returnCapacity(mode: ReturnConsumedCapacity = 'INDEXES'): TransactionWriteBuilder {
+        this.returnConsumedCapacity = mode;
+        return this;
+    }
+
+    /** Requests local-secondary-index item-collection metrics in the transaction response. */
+    returnItemCollectionMetrics(): TransactionWriteBuilder {
+        this.itemCollectionMetricsMode = 'SIZE';
+        return this;
+    }
+
     /** Executes the transaction and caches the returned promise. */
     toPromise(): Promise<TransactWriteItemsCommandOutput> {
         if (this.executed !== null) {
@@ -78,7 +93,8 @@ export class TransactionWriteBuilder {
         }
 
         const input = {
-            ReturnConsumedCapacity: 'INDEXES' as const,
+            ReturnConsumedCapacity: this.returnConsumedCapacity,
+            ReturnItemCollectionMetrics: this.itemCollectionMetricsMode,
             TransactItems: this.items,
             ClientRequestToken: this.requestToken
         };

@@ -102,3 +102,49 @@ test('returns only attributes available from global secondary index projections'
         ExpressionAttributeValues: {':status': {S: 'open'}}
     })), /non-projected attribute/);
 });
+
+test('supports fluent response metadata, point projections, and parallel scan segments', async (context) => {
+    const backend = createInMemoryDynamoDB([{
+        TableName: 'segmented-records',
+        KeySchema: [
+            {AttributeName: 'id', KeyType: 'HASH'},
+            {AttributeName: 'sort', KeyType: 'RANGE'}
+        ],
+        AttributeDefinitions: [
+            {AttributeName: 'id', AttributeType: 'S'},
+            {AttributeName: 'sort', AttributeType: 'N'},
+            {AttributeName: 'alternate', AttributeType: 'N'}
+        ],
+        LocalSecondaryIndexes: [{
+            IndexName: 'alternate-index',
+            KeySchema: [
+                {AttributeName: 'id', KeyType: 'HASH'},
+                {AttributeName: 'alternate', KeyType: 'RANGE'}
+            ],
+            Projection: {ProjectionType: 'ALL'}
+        }]
+    }]);
+    context.after(() => backend.close());
+    const query = () => new QueryBuilder('segmented-records', backend.db);
+
+    for (let index = 0; index < 6; index++) {
+        await query().create({id: `record-${index}`, sort: index, alternate: index, value: index}).toPromise();
+    }
+
+    const projected = await query().get({id: 'record-0', sort: 0}).select('id', 'value').toPromise();
+    assert.deepEqual(projected, {id: 'record-0', value: 0});
+
+    const response = await query().update({id: 'record-0', sort: 0})
+        .set('value').eq(10)
+        .returnCapacity('TOTAL')
+        .returnItemCollectionMetrics()
+        .toResponse<{id: string; value: number}>();
+    assert.equal(response.value?.value, 10);
+    assert.deepEqual(response.consumedCapacity, [{TableName: 'segmented-records', CapacityUnits: 1}]);
+    assert.equal(response.itemCollectionMetrics.length, 1);
+
+    const first = await query().scan().parallel(0, 2).toPromise<any[]>();
+    const second = await query().scan().parallel(1, 2).toPromise<any[]>();
+    assert.deepEqual([...first, ...second].map((item) => item.id).sort(), Array.from({length: 6}, (_, index) => `record-${index}`));
+    assert.throws(() => query().scan().parallel(2, 2), /segment/);
+});

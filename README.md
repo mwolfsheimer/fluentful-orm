@@ -238,10 +238,10 @@ const task = await tasks.get({
 }).toPromise();
 ```
 
-The result is the record or `null` when it does not exist. Pass `true` as the second argument for a strongly consistent table read:
+The result is the record or `null` when it does not exist. Call `.consistent()` for a strongly consistent table read:
 
 ```ts
-const task = await tasks.get(key, true).toPromise();
+const task = await tasks.get(key).consistent().toPromise();
 ```
 
 Strongly consistent reads are not supported by DynamoDB global secondary indexes.
@@ -448,7 +448,7 @@ The reverse order, `.onConditionFailure().returningAllOld().returningNone()`, ha
 | Omitted | `onConditionFailure().returningNone()` | Updated item | Deleted item | Rejects without `Item` |
 | `returningNone()` | `onConditionFailure().returningNone()` | `undefined` | `undefined` | Rejects without `Item` |
 
-For successful updates, `returningAllNew()` explicitly selects the default full payload; for successful deletes, use `returningAllOld()`. These success methods remain independent of either failure option. A successful delete without an existing item returns `null` by default. Create and condition-check chains also support failure-return options, but do not expose these update/delete success-return methods. The failure configuration does not offer `returningAllNew()`: no updated item exists when a condition rejects the write.
+For successful updates, `returningAllNew()` explicitly selects the default full payload; for successful deletes, use `returningAllOld()`. `create()` also supports `returningAllOld()` to return the item it overwrote. These success methods remain independent of either failure option. A successful delete without an existing item returns `null` by default. Condition-check chains support only failure-return options. The failure configuration does not offer `returningAllNew()`: no updated item exists when a condition rejects the write.
 
 `onConditionFailure()` alone is a configuration step, not an executable write chain. Select `returningAllOld()` or `returningNone()` to resume the chain. `toPromiseOrNull()` on an update still discards a conditional failure's payload and resolves to `null`, even when old-item return is enabled; use `toPromise()` and catch the SDK error when the snapshot is needed.
 
@@ -660,10 +660,10 @@ const matching = await tasks
     .toPromise();
 ```
 
-Pass `true` for a strongly consistent scan:
+Call `.consistent()` for a strongly consistent scan:
 
 ```ts
-const matching = await tasks.scan(true).where('status').eq('doing').toPromise();
+const matching = await tasks.scan().consistent().where('status').eq('doing').toPromise();
 ```
 
 Scans may consume substantial read capacity. Prefer a query for request paths and known access patterns.
@@ -791,11 +791,11 @@ Set bounded concurrency explicitly when needed:
 
 ```ts
 await tasks.createBatch(newTasks, {concurrency: 2});
-await tasks.getBatch(taskKeys, {concurrency: 2}, true);
+await tasks.getBatch(taskKeys, {concurrency: 2, consistentRead: true});
 await tasks.deleteBatch(taskKeys, {concurrency: 2});
 ```
 
-`getBatch()` accepts `consistentRead` as its third argument and removes duplicate keys before sending requests. DynamoDB does not guarantee that batch-get results have the same order as the input keys.
+`getBatch()` accepts `consistentRead` in its options object and removes duplicate keys before sending requests. DynamoDB does not guarantee that batch-get results have the same order as the input keys.
 
 Empty input arrays complete without sending a DynamoDB request: creates and gets return `[]`, while deletes return `void`. Unprocessed reads and writes are retried up to eight times with jittered backoff; the operation rejects if DynamoDB still returns unprocessed items after the final retry. When one concurrent chunk fails, no new chunks are scheduled, but already-running chunks are allowed to settle before the batch rejects.
 
@@ -879,6 +879,23 @@ await typedTransaction(dynamoDB)
 ```
 
 Avoid logging records or request values when they may contain secrets or personal data.
+
+### Response metadata
+
+`toPromise()` continues to return only the operation value. Call `toResponse()` after `returnCapacity()` when the caller also needs DynamoDB response metadata:
+
+```ts
+const response = await tasks
+    .query({projectId: 'project-1'})
+    .descending()
+    .returnCapacity('TOTAL')
+    .toResponse();
+
+response.value;            // Task[]
+response.consumedCapacity; // one entry per DynamoDB request or page
+```
+
+`returnCapacity()` accepts `'NONE'`, `'TOTAL'`, or `'INDEXES'`; omission keeps the existing `'INDEXES'` request mode. Writes can additionally call `returnItemCollectionMetrics()` to receive approximate local-secondary-index collection sizes in `response.itemCollectionMetrics`. `create()` and `update()` also support `returningAllOld()` for a successful overwrite's previous item. Point reads support `.select(...)`; `query()` supports `.ascending()` and `.descending()`; and `scan().parallel(segment, totalSegments)` configures one parallel-scan segment.
 
 ## Values and serialization
 
@@ -1070,16 +1087,16 @@ defineTable({
 | Operation | Result |
 | --- | --- |
 | `create(document).toPromise()` | created record |
-| `get(key, consistentRead?).toPromise()` | record or `null` |
+| `get(key).toPromise()` | record or `null` |
 | `update(key)...toPromise()` | new record or `null` |
 | `update(key)...returningNone().toPromise()` | `void` |
 | `delete(key).toPromise()` | old record or `null` |
 | `delete(key).returningNone().toPromise()` | `void` |
-| `query(partitionKey, consistentRead?).toPromise()` | records |
+| `query(partitionKey).toPromise()` | records |
 | `index(name).query(partitionKey).toPromise()` | records |
-| `scan(consistentRead?).toPromise()` | records |
+| `scan().toPromise()` | records |
 | `createBatch(documents, options?)` | created records |
-| `getBatch(keys, options?, consistentRead?)` | records |
+| `getBatch(keys, options?)` | records |
 | `deleteBatch(keys, options?)` | `void` |
 
 ### Read modifiers
@@ -1093,6 +1110,10 @@ defineTable({
 | `select(...fields)` | project and type selected fields |
 | `count().toPromise()` | count matches across pages |
 | `limit(chunkSize, hardLimit?)` | configure all-page reads |
+| `consistent()` | request a strongly consistent table or local-index read |
+| `ascending()` / `descending()` | choose query sort-key order |
+| `returnCapacity(mode?)` | include consumed capacity in `toResponse()` |
+| `parallel(segment, totalSegments)` | configure one segment of a parallel scan |
 | `page({limit?, cursor?})` | fetch one page |
 | `pages({limit?, cursor?})` | lazily iterate pages |
 | `items({limit?, cursor?})` | lazily iterate records |
@@ -1130,8 +1151,8 @@ From this package:
 npm test
 ```
 
-The live DynamoDB integration suite creates and removes temporary tables in the configured AWS environment:
+The live DynamoDB integration suite creates and removes temporary tables in the selected AWS region. It uses the standard AWS SDK credential provider chain and defaults to `eu-west-2` when `AWS_REGION` is unset:
 
 ```powershell
-npm run test:integration
+$env:AWS_PROFILE = 'your-profile'; $env:AWS_REGION = 'us-east-1'; npm run test:integration
 ```

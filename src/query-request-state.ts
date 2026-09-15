@@ -1,7 +1,7 @@
 import type {AttributeValue, BatchGetItemCommandInput, BatchWriteItemCommandInput} from "@aws-sdk/client-dynamodb";
 import type {ExpressionBuilder, ExpressionTarget} from "./expression-builder";
 import type {QueryOperation} from "./query-operation";
-import type {IndexKind} from "./types";
+import type {IndexKind, ReturnConsumedCapacity} from "./types";
 
 type AttributeMap = Record<string, AttributeValue>;
 type BatchGetRequestItems = NonNullable<BatchGetItemCommandInput['RequestItems']>;
@@ -11,6 +11,7 @@ type BatchWriteRequestItems = NonNullable<BatchWriteItemCommandInput['RequestIte
 export class QueryRequestState {
     private operation: QueryOperation | null = null;
     private conditionFailureReturnValues: 'ALL_OLD' | 'NONE' | null = null;
+    private indexKind: IndexKind | null = null;
 
     /** Sets the payload returned when a conditional write fails. */
     setReturnValuesOnConditionCheckFailure(value: 'ALL_OLD' | 'NONE'): void {
@@ -26,6 +27,23 @@ export class QueryRequestState {
             kind: 'putItem',
             input: {ReturnConsumedCapacity: 'INDEXES', TableName: tableName, Item: item}
         };
+    }
+
+    /** Configures the capacity metadata requested from DynamoDB. */
+    setReturnConsumedCapacity(value: ReturnConsumedCapacity): void {
+        if (this.operation === null || this.operation.kind === 'conditionCheck') {
+            throw new Error('Consumed capacity requires an executable DynamoDB operation');
+        }
+        this.operation.input.ReturnConsumedCapacity = value;
+    }
+
+    /** Requests approximate item-collection size estimates for a write operation. */
+    setReturnItemCollectionMetrics(value: 'NONE' | 'SIZE'): void {
+        if (this.operation === null || (this.operation.kind !== 'putItem' && this.operation.kind !== 'updateItem'
+            && this.operation.kind !== 'deleteItem' && this.operation.kind !== 'batchWriteItem')) {
+            throw new Error('Item collection metrics require a write operation');
+        }
+        this.operation.input.ReturnItemCollectionMetrics = value;
     }
 
     /** Starts a BatchWriteItem operation. */
@@ -113,7 +131,39 @@ export class QueryRequestState {
                 throw new Error(`Global secondary index ${indexName} does not support consistent reads`);
             }
             this.operation.input.IndexName = indexName;
+            this.indexKind = kind;
         }
+    }
+
+    /** Requests strongly consistent reads where DynamoDB supports them. */
+    setConsistentRead(): void {
+        if (this.operation === null || (this.operation.kind !== 'getItem' && this.operation.kind !== 'query' && this.operation.kind !== 'scan')) {
+            throw new Error('Consistent reads require a get, query, or scan operation');
+        }
+        if (this.operation.kind === 'query' && this.indexKind === 'global') {
+            throw new Error(`Global secondary index ${this.operation.input.IndexName} does not support consistent reads`);
+        }
+        this.operation.input.ConsistentRead = true;
+    }
+
+    /** Changes query sort-key traversal direction. */
+    setScanIndexForward(value: boolean): void {
+        if (this.operation === null || this.operation.kind !== 'query') {
+            throw new Error('Query ordering requires a query operation');
+        }
+        this.operation.input.ScanIndexForward = value;
+    }
+
+    /** Configures one segment of a DynamoDB parallel scan. */
+    setParallelScan(segment: number, totalSegments: number): void {
+        if (this.operation === null || this.operation.kind !== 'scan') {
+            throw new Error('Parallel scans require a scan operation');
+        }
+        if (!Number.isInteger(totalSegments) || totalSegments < 1 || !Number.isInteger(segment) || segment < 0 || segment >= totalSegments) {
+            throw new Error('Parallel scan segment must be a non-negative integer less than totalSegments');
+        }
+        this.operation.input.Segment = segment;
+        this.operation.input.TotalSegments = totalSegments;
     }
 
     /** Sets the DynamoDB page size for a query or scan. */
@@ -125,7 +175,7 @@ export class QueryRequestState {
 
     /** Sets the projected attributes for a query or scan. */
     setProjection(attributes: string[]): void {
-        if (this.operation !== null && (this.operation.kind === 'query' || this.operation.kind === 'scan')) {
+        if (this.operation !== null && (this.operation.kind === 'query' || this.operation.kind === 'scan' || this.operation.kind === 'getItem')) {
             this.operation.input.ProjectionExpression = attributes.map((attribute) => `#${attribute}`).join(', ');
         }
     }
@@ -138,9 +188,17 @@ export class QueryRequestState {
     }
 
     /** Sets the successful return payload mode for an update. */
-    setUpdateReturnValues(value: 'ALL_NEW' | 'NONE'): void {
+    setUpdateReturnValues(value: 'ALL_NEW' | 'ALL_OLD' | 'NONE'): void {
         if (this.operation === null || this.operation.kind !== 'updateItem') {
             throw new Error('Update return values require an update operation');
+        }
+        this.operation.input.ReturnValues = value;
+    }
+
+    /** Sets the successful return payload mode for a put. */
+    setPutReturnValues(value: 'ALL_OLD' | 'NONE'): void {
+        if (this.operation === null || this.operation.kind !== 'putItem') {
+            throw new Error('Put return values require a create operation');
         }
         this.operation.input.ReturnValues = value;
     }

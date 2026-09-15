@@ -11,10 +11,10 @@ import {
     UpdateItemCommand
 } from "@aws-sdk/client-dynamodb";
 import type {BatchGetItemCommandOutput, BatchWriteItemCommandOutput, QueryCommandOutput, ScanCommandOutput} from "@aws-sdk/client-dynamodb";
-import type {AttributeValue, BatchGetItemCommandInput, BatchWriteItemCommandInput} from "@aws-sdk/client-dynamodb";
+import type {AttributeValue, BatchGetItemCommandInput, BatchWriteItemCommandInput, ConsumedCapacity, ItemCollectionMetrics} from "@aws-sdk/client-dynamodb";
 import type {QueryOperation} from "./query-operation";
 import {QuerySerializer} from "./query-serializer";
-import type {GenericDocument, QueryCursor, QueryPage} from "./types";
+import type {DynamoResponse, GenericDocument, QueryCursor, QueryPage} from "./types";
 import {ValueUtils} from './value-utils';
 
 type QueryLogger = null | ((message: any) => void);
@@ -22,11 +22,14 @@ type DocumentParser = null | ((document: unknown, projection?: readonly string[]
 type ExecutionResult<T> = T | GenericDocument<any> | GenericDocument<any>[] | null | undefined;
 type BatchRequestItems = NonNullable<BatchGetItemCommandInput['RequestItems']> | NonNullable<BatchWriteItemCommandInput['RequestItems']>;
 type LastEvaluatedKey = Record<string, AttributeValue>;
+type MetadataOutput = {ConsumedCapacity?: ConsumedCapacity | ConsumedCapacity[], ItemCollectionMetrics?: ItemCollectionMetrics | ItemCollectionMetrics[] | Record<string, ItemCollectionMetrics[]>};
 
 /** Executes one QueryBuilder operation against DynamoDB and parses its results. */
 export class QueryExecutor {
     private output: GenericDocument<any>[] = [];
     private batchRetryCount = 0;
+    private consumedCapacity: ConsumedCapacity[] = [];
+    private itemCollectionMetrics: ItemCollectionMetrics[] = [];
 
     /** Creates an executor for one assembled operation and its result parser. */
     constructor(
@@ -42,7 +45,17 @@ export class QueryExecutor {
 
     /** Executes the operation, following query/scan pages and retrying unprocessed batches. */
     execute<T>(): Promise<ExecutionResult<T>> {
-        return this.executeOperation<T>();
+        return this.executeResponse<T>().then((response) => response.value);
+    }
+
+    /** Executes the operation and includes capacity and item-collection metadata. */
+    async executeResponse<T>(): Promise<DynamoResponse<ExecutionResult<T>>> {
+        const value = await this.executeOperation<T>();
+        return {
+            value: value,
+            consumedCapacity: this.consumedCapacity,
+            itemCollectionMetrics: this.itemCollectionMetrics
+        };
     }
 
     /** Executes one query or scan page from an optional cursor. */
@@ -56,6 +69,7 @@ export class QueryExecutor {
         const result = this.operation.kind === 'query'
             ? await this.dynamoDB.send(new QueryCommand(this.operation.input))
             : await this.dynamoDB.send(new ScanCommand(this.operation.input));
+        this.captureMetadata(result);
         const items = result.Items ? result.Items.map((item) => this.parseDocument(item)) as T[] : [];
         this.logResult(items.length, result.ConsumedCapacity);
 
@@ -96,6 +110,7 @@ export class QueryExecutor {
         switch (this.operation.kind) {
             case 'getItem':
                 return this.dynamoDB.send(new GetItemCommand(this.operation.input)).then((result) => {
+                    this.captureMetadata(result);
                     if (result.Item) {
                         const parsed = this.parseDocument(result.Item);
                         this.logResult(parsed ? 1 : 0, result.ConsumedCapacity);
@@ -111,6 +126,7 @@ export class QueryExecutor {
 
             case 'deleteItem':
                 return this.dynamoDB.send(new DeleteItemCommand(this.operation.input)).then((result) => {
+                    this.captureMetadata(result);
                     if (result.Attributes) {
                         const parsed = this.parseDocument(result.Attributes);
                         this.logResult(parsed ? 1 : 0, result.ConsumedCapacity);
@@ -130,6 +146,7 @@ export class QueryExecutor {
 
             case 'updateItem':
                 return this.dynamoDB.send(new UpdateItemCommand(this.operation.input)).then((result) => {
+                    this.captureMetadata(result);
                     if (result.Attributes) {
                         const parsed = this.parseDocument(result.Attributes);
                         this.logResult(parsed ? 1 : 0, result.ConsumedCapacity);
@@ -140,8 +157,17 @@ export class QueryExecutor {
                 });
 
             case 'putItem':
+                const putReturnValues = this.operation.input.ReturnValues;
                 return this.dynamoDB.send(new PutItemCommand(this.operation.input)).then((result) => {
+                    const returnsOld = (this.operation.input as {ReturnValues?: string}).ReturnValues === 'ALL_OLD';
+                    this.captureMetadata(result);
                     this.logResult(1, result.ConsumedCapacity);
+                    if (returnsOld) {
+                        return result.Attributes ? this.parseDocument(result.Attributes) : null;
+                    }
+                    if (putReturnValues === 'ALL_OLD') {
+                        return result.Attributes ? this.parseDocument(result.Attributes) : null;
+                    }
                     return this.documents[0];
                 });
 
@@ -156,6 +182,7 @@ export class QueryExecutor {
                         ConditionExpression: this.operation.input.ConditionExpression
                     }}]
                 })).then((result) => {
+                    this.captureMetadata(result);
                     this.logResult(0, result.ConsumedCapacity);
                     return result as T;
                 });
@@ -167,6 +194,7 @@ export class QueryExecutor {
     }
 
     private handleBatchGetResult<T>(result: BatchGetItemCommandOutput): Promise<ExecutionResult<T>> | GenericDocument<any>[] {
+        this.captureMetadata(result);
         if (result.Responses) {
             Object.keys(result.Responses).forEach((tableName) => {
                 if (result.Responses) {
@@ -184,6 +212,7 @@ export class QueryExecutor {
     }
 
     private handleBatchWriteResult<T>(result: BatchWriteItemCommandOutput): Promise<ExecutionResult<T>> | GenericDocument<any>[] {
+        this.captureMetadata(result);
         if (result.UnprocessedItems && Object.keys(result.UnprocessedItems).length > 0) {
             return this.retryUnprocessedBatch<T>(result.UnprocessedItems);
         }
@@ -192,6 +221,7 @@ export class QueryExecutor {
     }
 
     private handlePagedResult<T>(result: QueryCommandOutput | ScanCommandOutput): Promise<ExecutionResult<T>> | GenericDocument<any>[] {
+        this.captureMetadata(result);
         if (result.Items) {
             const parsed = result.Items.map((item) => this.parseDocument(item));
             this.logResult(parsed.length, result.ConsumedCapacity);
@@ -223,6 +253,7 @@ export class QueryExecutor {
             } else {
                 throw new Error('Count is supported only for query and scan operations');
             }
+            this.captureMetadata(result);
             count += result.Count || 0;
             this.logResult(result.Count || 0, result.ConsumedCapacity);
             cursor = result.LastEvaluatedKey || null;
@@ -266,6 +297,31 @@ export class QueryExecutor {
         }
     }
 
+    private captureMetadata(result: MetadataOutput): void {
+            if (Array.isArray(result.ConsumedCapacity)) {
+            this.consumedCapacity.push(...result.ConsumedCapacity);
+        } else if (result.ConsumedCapacity !== undefined) {
+            this.consumedCapacity.push(result.ConsumedCapacity);
+        }
+        const metrics = result.ItemCollectionMetrics;
+        if (metrics === undefined) {
+            return;
+        }
+        if (Array.isArray(metrics)) {
+            this.itemCollectionMetrics.push(...metrics);
+            return;
+        }
+        if ('ItemCollectionKey' in metrics || 'SizeEstimateRangeGB' in metrics) {
+            this.itemCollectionMetrics.push(metrics as ItemCollectionMetrics);
+            return;
+        }
+        if ('ItemCollectionKey' in metrics) {
+            this.itemCollectionMetrics.push(metrics);
+            return;
+        }
+        Object.values(metrics as Record<string, ItemCollectionMetrics[]>).forEach((entries) => this.itemCollectionMetrics.push(...entries));
+    }
+
     private logResult(count: number, capacity: unknown): void {
         this.logger && this.logger({
             id: this.requestId,
@@ -281,6 +337,11 @@ export class QueryExecutor {
 
     private parseDocument(item: Record<string, AttributeValue>): GenericDocument<any> {
         const parsed = QuerySerializer.parseItem(item);
-        return this.documentParser === null ? parsed : this.documentParser(parsed, this.projection);
+        const projected = this.projection === null
+            ? parsed
+            : Object.fromEntries(this.projection
+                .filter((attribute) => Object.prototype.hasOwnProperty.call(parsed, attribute))
+                .map((attribute) => [attribute, parsed[attribute]]));
+        return this.documentParser === null ? projected : this.documentParser(projected, this.projection);
     }
 }
