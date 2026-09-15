@@ -5,13 +5,12 @@ import type {BatchOptions, ConditionalWriteResult, ConditionFailureReturnOptions
 import {TransactionWriteBuilder} from './transaction-write-builder';
 import type {TransactionItemOptions} from './transaction-write-builder';
 
-type Buffer = Uint8Array;
 type AnyRecord = Record<string, any>;
 type RecordSchema = z.ZodObject<z.ZodRawShape>;
 type RecordOf<TSchema extends RecordSchema> = z.output<TSchema>;
 type InputOf<TSchema extends RecordSchema> = z.input<TSchema>;
 type RecordKey<TRecord> = Extract<keyof TRecord, string>;
-type DynamoKeyValue = string | number | Buffer;
+type DynamoKeyValue = string | number | Uint8Array;
 type DynamoKeyField<TRecord> = {[TKey in RecordKey<TRecord>]: TRecord[TKey] extends DynamoKeyValue ? TKey : never}[RecordKey<TRecord>];
 
 /** Declares the partition key and optional sort key for a typed table or index. */
@@ -148,7 +147,7 @@ export interface TypedSortKeyComparison<TValue, TRecord, TResult = TRecord, TSel
     /** Matches sort-key values in the inclusive range. */
     between(lower: TValue, upper: TValue): TypedQueryChain<TRecord, TResult, TSelectable>;
     /** Matches string or binary sort keys beginning with the supplied prefix. */
-    beginsWith(value: TValue extends string | Buffer ? TValue : never): TypedQueryChain<TRecord, TResult, TSelectable>;
+    beginsWith(value: TValue extends string | Uint8Array ? TValue : never): TypedQueryChain<TRecord, TResult, TSelectable>;
 }
 
 /** Typed query chain for a composite key with a sort-key comparison entry point. */

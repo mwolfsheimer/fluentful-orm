@@ -11,8 +11,8 @@ import type {DynamoDBTableDefinition} from "./query-table-admin";
 import {QuerySerializer} from "./query-serializer";
 import {TransactionWriteBuilder} from "./transaction-write-builder";
 
-type Buffer = Uint8Array;
 import type {TransactionItemOptions} from "./transaction-write-builder";
+type Binary = Uint8Array;
 import {defineTable as defineTypedTable} from "./typed-table";
 import {UpdateExpressionType} from "./types";
 import type {ConditionalWriteResult} from "./types";
@@ -69,13 +69,13 @@ export class QueryBuilder {
 
     private set_add(attribute: string): AddSubQuery {
         return {
-            eq: (val: Set<string | number | Buffer> | number): UpdateSubQuery => this.applyUpdate(UpdateExpressionType.ADD, attribute, val)
+            eq: (val: Set<string | number | Binary> | number): UpdateSubQuery => this.applyUpdate(UpdateExpressionType.ADD, attribute, val)
         };
     }
 
     private set_delete(attribute: string): UpdateEqQuery {
         return {
-            eq: (val: Set<string | number | Buffer>): UpdateSubQuery => this.applyUpdate(UpdateExpressionType.DELETE, attribute, val)
+            eq: (val: Set<string | number | Binary>): UpdateSubQuery => this.applyUpdate(UpdateExpressionType.DELETE, attribute, val)
         };
     }
 
@@ -410,23 +410,23 @@ export class QueryBuilder {
 
     private querySortKey(attribute: string) {
         return {
-            eq: (value: string | number | Buffer) => this.addQuerySortKey(attribute, '=', value),
-            gt: (value: string | number | Buffer) => this.addQuerySortKey(attribute, '>', value),
-            gte: (value: string | number | Buffer) => this.addQuerySortKey(attribute, '>=', value),
-            lt: (value: string | number | Buffer) => this.addQuerySortKey(attribute, '<', value),
-            lte: (value: string | number | Buffer) => this.addQuerySortKey(attribute, '<=', value),
-            between: (lower: string | number | Buffer, upper: string | number | Buffer) => {
+            eq: (value: string | number | Binary) => this.addQuerySortKey(attribute, '=', value),
+            gt: (value: string | number | Binary) => this.addQuerySortKey(attribute, '>', value),
+            gte: (value: string | number | Binary) => this.addQuerySortKey(attribute, '>=', value),
+            lt: (value: string | number | Binary) => this.addQuerySortKey(attribute, '<', value),
+            lte: (value: string | number | Binary) => this.addQuerySortKey(attribute, '<=', value),
+            between: (lower: string | number | Binary, upper: string | number | Binary) => {
                 this.expressions.addKeyBetween(attribute, lower, upper);
                 return this.queryResult();
             },
-            beginsWith: (value: string | Buffer) => {
+            beginsWith: (value: string | Binary) => {
                 this.expressions.addKeyBeginsWith(attribute, value);
                 return this.queryResult();
             }
         };
     }
 
-    private addQuerySortKey(attribute: string, operator: string, value: string | number | Buffer): Query {
+    private addQuerySortKey(attribute: string, operator: string, value: string | number | Binary): Query {
         this.expressions.addKeyComparison(attribute, operator, value);
         return this.queryResult();
     }
@@ -466,7 +466,7 @@ export class QueryBuilder {
         this.expressions.addComparison(whereKey, operator, val, isNot, filter);
     }
 
-    private addWhereInExpression(whereKey: string, val: (string | number | Buffer)[], isNot: boolean, filter: boolean): void {
+    private addWhereInExpression(whereKey: string, val: (string | number | Binary)[], isNot: boolean, filter: boolean): void {
         this.expressions.addInComparison(whereKey, val, isNot, filter);
     }
 

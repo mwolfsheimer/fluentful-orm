@@ -1,6 +1,6 @@
 {
   "name": "@fluentful/orm",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "A typed fluent query builder for AWS SDK v3 DynamoDB.",
   "keywords": [
     "aws",
@@ -58,7 +58,7 @@
     "@types/node": "^25.6.0",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.3",
-    "zod": "4.3.6"
+    "zod": "^4.6.5"
   },
   "publishConfig": {
     "access": "public"

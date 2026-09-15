@@ -19,4 +19,21 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+  consumer:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        zod-version: [4.3.6, 4.6.5]
+        aws-sdk-version: [3.1037.0, latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+          cache: npm
+      - run: npm ci
+      - run: npm run build
       - run: npm run test:consumer
+        env:
+          ZOD_VERSION: ${{ matrix.zod-version }}
+          AWS_SDK_VERSION: ${{ matrix.aws-sdk-version }}

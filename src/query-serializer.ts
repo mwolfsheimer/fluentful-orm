@@ -62,7 +62,7 @@ export class QuerySerializer {
                 return {BOOL: val};
             case 'object':
                 if (val instanceof Uint8Array) {
-                    return {B: ValueUtils.clone(val) as Buffer};
+                    return {B: ValueUtils.clone(val) as Uint8Array};
                 } else {
                     return QuerySerializer.serialiseObject(val);
                 }
@@ -105,7 +105,7 @@ export class QuerySerializer {
                         if (arr.some((item) => !(item instanceof Uint8Array))) {
                             return QuerySerializer.serialiseList(arr);
                         } else {
-                            return {BS: arr.map((item) => ValueUtils.clone(item) as Buffer)};
+                            return {BS: arr.map((item) => ValueUtils.clone(item) as Uint8Array)};
                         }
                     default:
                         return QuerySerializer.serialiseList(arr);
@@ -113,7 +113,7 @@ export class QuerySerializer {
             }
         } else {
             if (val instanceof Uint8Array) {
-                return {B: val as Buffer};
+                return {B: val as Uint8Array};
             } else {
                 return {M: QuerySerializer.serialiseMap(val as any)};
             }

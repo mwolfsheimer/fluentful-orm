@@ -2,8 +2,6 @@ import {QuerySerializer} from "./query-serializer";
 import {UpdateExpressionType} from "./types";
 import type {GenericDocument, GetSelector} from "./types";
 
-type Buffer = Uint8Array;
-
 /** Expression fields populated on an AWS DynamoDB request input. */
 export interface ExpressionTarget {
     /** Compiled update expression. */
@@ -114,7 +112,7 @@ export class ExpressionBuilder {
     }
 
     /** Adds an `IN` comparison to a condition or filter. */
-    addInComparison(name: string, values: (string | number | Buffer)[], negated: boolean, filter: boolean): void {
+    addInComparison(name: string, values: (string | number | Uint8Array)[], negated: boolean, filter: boolean): void {
         if (values.length === 0) {
             throw new Error(`IN comparison on ${name} requires at least one value`);
         }

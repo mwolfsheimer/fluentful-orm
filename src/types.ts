@@ -1,4 +1,4 @@
-type Buffer = Uint8Array;
+type Binary = Uint8Array;
 
 export type SerialisedItem<T, A> = { L: SerialisedItem<T, any>[] } | { SS: T } | { M: A } | { NS: string[] } | { NULL: boolean } | { S: T } | { N: string } | { BOOL: T } | null
 export type SerialisedMap<T> = { [key: string]: SerialisedItem<T, any> }
@@ -79,17 +79,17 @@ export interface CreateWhereQuery {
     /** Requires the selected attribute not to equal the supplied value. */
     ne(val: any): CreateQuery;
     /** Requires the selected attribute to be greater than the supplied value. */
-    gt(num: string | number | Buffer): CreateQuery;
+    gt(num: string | number | Binary): CreateQuery;
     /** Requires the selected attribute to be greater than or equal to the supplied value. */
-    gte(num: string | number | Buffer): CreateQuery;
+    gte(num: string | number | Binary): CreateQuery;
     /** Requires the selected attribute to be less than the supplied value. */
-    lt(num: string | number | Buffer): CreateQuery;
+    lt(num: string | number | Binary): CreateQuery;
     /** Requires the selected attribute to be less than or equal to the supplied value. */
-    lte(num: string | number | Buffer): CreateQuery;
+    lte(num: string | number | Binary): CreateQuery;
     /** Requires the selected attribute to contain the supplied value. */
-    contains(val: string | number | Buffer): CreateQuery;
+    contains(val: string | number | Binary): CreateQuery;
     /** Requires the selected attribute to match one of the supplied values. */
-    in(val: (string | number | Buffer)[]): CreateQuery;
+    in(val: (string | number | Binary)[]): CreateQuery;
 }
 
 /** Negation entry point for a create condition. */
@@ -129,17 +129,17 @@ export interface DeleteWhereQuery {
     /** Requires the selected attribute not to equal the supplied value. */
     ne(val: any): DeleteQuery;
     /** Requires the selected attribute to be greater than the supplied value. */
-    gt(num: string | number | Buffer): DeleteQuery;
+    gt(num: string | number | Binary): DeleteQuery;
     /** Requires the selected attribute to be greater than or equal to the supplied value. */
-    gte(num: string | number | Buffer): DeleteQuery;
+    gte(num: string | number | Binary): DeleteQuery;
     /** Requires the selected attribute to be less than the supplied value. */
-    lt(num: string | number | Buffer): DeleteQuery;
+    lt(num: string | number | Binary): DeleteQuery;
     /** Requires the selected attribute to be less than or equal to the supplied value. */
-    lte(num: string | number | Buffer): DeleteQuery;
+    lte(num: string | number | Binary): DeleteQuery;
     /** Requires the selected attribute to contain the supplied value. */
-    contains(val: string | number | Buffer): DeleteQuery;
+    contains(val: string | number | Binary): DeleteQuery;
     /** Requires the selected attribute to match one of the supplied values. */
-    in(val: (string | number | Buffer)[]): DeleteQuery;
+    in(val: (string | number | Binary)[]): DeleteQuery;
 }
 
 /** Negation entry point for a delete condition. */
@@ -169,17 +169,17 @@ export interface ConditionCheckWhereQuery {
     /** Requires the selected attribute not to equal the supplied value. */
     ne(val: any): ConditionCheckQuery;
     /** Requires the selected attribute to be greater than the supplied value. */
-    gt(num: string | number | Buffer): ConditionCheckQuery;
+    gt(num: string | number | Binary): ConditionCheckQuery;
     /** Requires the selected attribute to be greater than or equal to the supplied value. */
-    gte(num: string | number | Buffer): ConditionCheckQuery;
+    gte(num: string | number | Binary): ConditionCheckQuery;
     /** Requires the selected attribute to be less than the supplied value. */
-    lt(num: string | number | Buffer): ConditionCheckQuery;
+    lt(num: string | number | Binary): ConditionCheckQuery;
     /** Requires the selected attribute to be less than or equal to the supplied value. */
-    lte(num: string | number | Buffer): ConditionCheckQuery;
+    lte(num: string | number | Binary): ConditionCheckQuery;
     /** Requires the selected attribute to contain the supplied value. */
-    contains(val: string | number | Buffer): ConditionCheckQuery;
+    contains(val: string | number | Binary): ConditionCheckQuery;
     /** Requires the selected attribute to match one of the supplied values. */
-    in(val: (string | number | Buffer)[]): ConditionCheckQuery;
+    in(val: (string | number | Binary)[]): ConditionCheckQuery;
 }
 
 /** Negation entry point for a condition-check condition. */
@@ -223,19 +223,19 @@ export interface Query {
 /** Comparisons supported for a declared query sort key. */
 export interface QuerySortKeyComparison {
     /** Matches an exact sort-key value. */
-    eq(value: string | number | Buffer): Query;
+    eq(value: string | number | Binary): Query;
     /** Matches sort-key values greater than the supplied value. */
-    gt(value: string | number | Buffer): Query;
+    gt(value: string | number | Binary): Query;
     /** Matches sort-key values greater than or equal to the supplied value. */
-    gte(value: string | number | Buffer): Query;
+    gte(value: string | number | Binary): Query;
     /** Matches sort-key values less than the supplied value. */
-    lt(value: string | number | Buffer): Query;
+    lt(value: string | number | Binary): Query;
     /** Matches sort-key values less than or equal to the supplied value. */
-    lte(value: string | number | Buffer): Query;
+    lte(value: string | number | Binary): Query;
     /** Matches sort-key values in the inclusive range. */
-    between(lower: string | number | Buffer, upper: string | number | Buffer): Query;
+    between(lower: string | number | Binary, upper: string | number | Binary): Query;
     /** Matches string or binary sort keys beginning with the supplied prefix. */
-    beginsWith(value: string | Buffer): Query;
+    beginsWith(value: string | Binary): Query;
 }
 
 /** Fluent operations available after selecting a secondary index. */
@@ -283,17 +283,17 @@ export interface QueryScanWhereNotSubQuery {
     /** Matches records where the selected attribute differs from the supplied value. */
     ne(val: any): SubQuery;
     /** Matches records where the selected attribute is greater than the supplied value. */
-    gt(num: string | number | Buffer): SubQuery;
+    gt(num: string | number | Binary): SubQuery;
     /** Matches records where the selected attribute is greater than or equal to the supplied value. */
-    gte(num: string | number | Buffer): SubQuery;
+    gte(num: string | number | Binary): SubQuery;
     /** Matches records where the selected attribute is less than the supplied value. */
-    lt(num: string | number | Buffer): SubQuery;
+    lt(num: string | number | Binary): SubQuery;
     /** Matches records where the selected attribute is less than or equal to the supplied value. */
-    lte(num: string | number | Buffer): SubQuery;
+    lte(num: string | number | Binary): SubQuery;
     /** Matches records where the selected attribute contains the supplied value. */
-    contains(val: string | number | Buffer): SubQuery;
+    contains(val: string | number | Binary): SubQuery;
     /** Matches records where the selected attribute equals one supplied value. */
-    in(val: (string | number | Buffer)[]): SubQuery;
+    in(val: (string | number | Binary)[]): SubQuery;
 }
 
 /** Negation entry point for a query or scan filter. */
@@ -323,17 +323,17 @@ export interface UpdateWhereQuery {
     /** Requires the selected attribute not to equal the supplied value. */
     ne(val: any): UpdateSubQuery;
     /** Requires the selected attribute to be greater than the supplied value. */
-    gt(num: string | number | Buffer): UpdateSubQuery;
+    gt(num: string | number | Binary): UpdateSubQuery;
     /** Requires the selected attribute to be greater than or equal to the supplied value. */
-    gte(num: string | number | Buffer): UpdateSubQuery;
+    gte(num: string | number | Binary): UpdateSubQuery;
     /** Requires the selected attribute to be less than the supplied value. */
-    lt(num: string | number | Buffer): UpdateSubQuery;
+    lt(num: string | number | Binary): UpdateSubQuery;
     /** Requires the selected attribute to be less than or equal to the supplied value. */
-    lte(num: string | number | Buffer): UpdateSubQuery;
+    lte(num: string | number | Binary): UpdateSubQuery;
     /** Requires the selected attribute to contain the supplied value. */
-    contains(val: string | number | Buffer): UpdateSubQuery;
+    contains(val: string | number | Binary): UpdateSubQuery;
     /** Requires the selected attribute to match one of the supplied values. */
-    in(val: (string | number | Buffer)[]): UpdateSubQuery;
+    in(val: (string | number | Binary)[]): UpdateSubQuery;
 }
 
 /** Negation entry point for an update condition. */
@@ -395,13 +395,13 @@ export interface SetSubQuery {
 /** Supplies the value for a numeric or set-membership ADD update. */
 export interface AddSubQuery {
     /** Applies the increment or set members and returns the update continuation. */
-    eq(val: Set<string | number | Buffer> | number): UpdateSubQuery;
+    eq(val: Set<string | number | Binary> | number): UpdateSubQuery;
 }
 
 /** Supplies the set members to remove with a DELETE update. */
 export interface DeleteSubQuery {
     /** Applies the set members and returns the update continuation. */
-    eq(val: Set<string | number | Buffer>): UpdateSubQuery;
+    eq(val: Set<string | number | Binary>): UpdateSubQuery;
 }
 
 export enum UpdateExpressionType {

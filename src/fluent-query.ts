@@ -1,6 +1,4 @@
-type Buffer = Uint8Array;
-
-export type ComparisonValue = string | number | Buffer;
+export type ComparisonValue = string | number | Uint8Array;
 export type ComparisonOperator = '=' | '<>' | '>' | '>=' | '<' | '<=' | 'contains';
 
 /** Fluent comparison methods used by query and scan filters. */
