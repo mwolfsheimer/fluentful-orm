@@ -1,5 +1,5 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { createInMemoryDynamoDB, defineTable } from "@fluentful/orm";
+import { createEngine, defineTable } from "@fluentful/orm";
 import { z } from "zod";
 
 const userSchema = z.object({
@@ -9,7 +9,7 @@ const userSchema = z.object({
 });
 
 const client = new DynamoDBClient({ region: "us-east-1" });
-const inMemoryDynamoDB = createInMemoryDynamoDB();
+const engine = createEngine.memory();
 
 const users = defineTable({
   name: "users",
@@ -19,4 +19,4 @@ const users = defineTable({
 
 void client;
 void users;
-void inMemoryDynamoDB;
+void engine;

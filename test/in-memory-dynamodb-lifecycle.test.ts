@@ -9,10 +9,10 @@ import {
     UpdateTimeToLiveCommand
 } from '@aws-sdk/client-dynamodb';
 import {QuerySerializer} from '../src/query-serializer';
-import {createInMemoryDynamoDB, QueryBuilder} from '../src/index';
+import {createEngine, QueryBuilder} from '../src/index';
 
 function fixture(context: TestContext) {
-    const backend = createInMemoryDynamoDB([{
+    const backend = createEngine.memory([{
         TableName: 'records',
         KeySchema: [{AttributeName: 'id', KeyType: 'HASH'}],
         AttributeDefinitions: [{AttributeName: 'id', AttributeType: 'S'}]
@@ -53,7 +53,7 @@ test('fails explicitly for unsupported commands and expression syntax even on em
 });
 
 test('returns only attributes available from global secondary index projections', async (context) => {
-    const backend = createInMemoryDynamoDB();
+    const backend = createEngine.memory();
     context.after(() => backend.close());
     await backend.db.send(new CreateTableCommand({
         TableName: 'projected-records',
@@ -104,7 +104,7 @@ test('returns only attributes available from global secondary index projections'
 });
 
 test('supports fluent response metadata, point projections, and parallel scan segments', async (context) => {
-    const backend = createInMemoryDynamoDB([{
+    const backend = createEngine.memory([{
         TableName: 'segmented-records',
         KeySchema: [
             {AttributeName: 'id', KeyType: 'HASH'},

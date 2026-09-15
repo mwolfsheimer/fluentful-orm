@@ -3,7 +3,7 @@ export {QueryBuilder, defineTable, createTable, deleteTable, describeTable, getT
 export {QuerySerializer} from "./query-serializer";
 export {ValueUtils} from './value-utils';
 export type {DynamoResponse, ReturnConsumedCapacity, BatchGetOptions, BatchWriteOptions} from './types';
-export {createInMemoryDynamoDB, InMemoryDynamoDB} from './in-memory-dynamodb';
+export {createEngine} from './in-memory-dynamodb';
 export {TransactionWriteBuilder} from "./transaction-write-builder";
 export type {TransactionItemOptions} from "./transaction-write-builder";
 export type {

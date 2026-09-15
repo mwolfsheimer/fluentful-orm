@@ -42,6 +42,7 @@ type Document = Record<string, unknown>;
 type AttributeMap = Record<string, AttributeValue>;
 type WriteInput = Pick<PutItemCommandInput, 'TableName'>
     & Partial<PutItemCommandInput & UpdateItemCommandInput & DeleteItemCommandInput>;
+type InitialTables = readonly (DynamoDBTableDefinition | CreateTableCommandInput)[];
 type MemoryCommand =
     | CreateTableCommand
     | DeleteTableCommand
@@ -62,6 +63,20 @@ interface MemoryTable {
     items: Map<string, Document>;
 }
 
+interface MemorySnapshot {
+    version: 1;
+    tables: Array<{
+        description: TableDescription;
+        items: AttributeMap[];
+    }>;
+}
+
+interface MemoryPersistence {
+    load(): Promise<MemorySnapshot | undefined>;
+    save(snapshot: MemorySnapshot): Promise<void>;
+    close?(): Promise<void>;
+}
+
 function validation(message: string): never {
     throw new DynamoDBServiceException({
         name: 'ValidationException',
@@ -76,10 +91,16 @@ function compare(left: unknown, right: unknown): number | null {
         return left - right;
     }
     if (typeof left === 'string' && typeof right === 'string') {
-        return Buffer.compare(Buffer.from(left), Buffer.from(right));
+        return left < right ? -1 : left > right ? 1 : 0;
     }
     if (left instanceof Uint8Array && right instanceof Uint8Array) {
-        return Buffer.compare(left, right);
+        const length = Math.min(left.length, right.length);
+        for (let index = 0; index < length; index++) {
+            if (left[index] !== right[index]) {
+                return left[index] - right[index];
+            }
+        }
+        return left.length - right.length;
     }
     return null;
 }
@@ -208,42 +229,114 @@ class MemoryExpression {
 }
 
 /** In-memory implementation of the DynamoDB operations used by QueryBuilder. */
-export class InMemoryDynamoDB {
+class InMemoryDynamoDB {
     /** DynamoDB-compatible client passed to QueryBuilder and typed tables. */
     readonly db: DynamoDBClient;
     private tables = new Map<string, MemoryTable>();
     private tokens = new Map<string, {input: TransactWriteItemsCommandInput; expires: number}>();
     private closed = false;
+    private operation: Promise<void> = Promise.resolve();
+    private readonly ready: Promise<void>;
 
     /** Creates an isolated in-memory backend and optionally seeds its table definitions. */
-    constructor(tables: readonly (DynamoDBTableDefinition | CreateTableCommandInput)[] = []) {
+    constructor(tables: InitialTables = [], private readonly persistence?: MemoryPersistence) {
         this.db = new DynamoDBClient({
             region: 'us-east-1',
             credentials: {accessKeyId: 'in-memory', secretAccessKey: 'in-memory'}
         });
         this.db.send = (async (command: MemoryCommand) => {
-            if (this.closed) {
-                throw new Error('In-memory DynamoDB backend is closed');
-            }
-            return ValueUtils.clone(this.execute(command));
+            return this.enqueue(async () => {
+                await this.ready;
+                if (this.closed) {
+                    throw new Error('In-memory DynamoDB backend is closed');
+                }
+                const response = this.execute(command);
+                if (this.mutates(command)) {
+                    await this.persistence?.save(this.snapshot());
+                }
+                return ValueUtils.clone(response);
+            });
         }) as typeof this.db.send;
         for (const table of tables) {
             this.execute(new CreateTableCommand('name' in table ? QueryTableAdmin.toCreateTableInput(table) : table));
         }
+        this.ready = this.load();
     }
 
     /** Removes all records and transaction tokens while retaining table definitions. */
-    reset(): void {
-        for (const table of this.tables.values()) table.items.clear();
-        this.tokens.clear();
+    async reset(): Promise<void> {
+        await this.enqueue(async () => {
+            await this.ready;
+            if (this.closed) {
+                throw new Error('In-memory DynamoDB backend is closed');
+            }
+            for (const table of this.tables.values()) table.items.clear();
+            this.tokens.clear();
+            await this.persistence?.save(this.snapshot());
+        });
     }
 
     /** Closes the client, removes table definitions, and rejects future requests. */
     async close(): Promise<void> {
+        if (this.closed) {
+            return;
+        }
         this.closed = true;
+        await this.ready;
+        await this.operation;
         this.tables.clear();
         this.tokens.clear();
+        await this.persistence?.close?.();
         this.db.destroy();
+    }
+
+    private enqueue<Result>(action: () => Promise<Result>): Promise<Result> {
+        const result = this.operation.then(action);
+        this.operation = result.then(() => undefined, () => undefined);
+        return result;
+    }
+
+    private async load(): Promise<void> {
+        const snapshot = await this.persistence?.load();
+        if (snapshot === undefined) {
+            await this.persistence?.save(this.snapshot());
+            return;
+        }
+        if (snapshot.version !== 1) {
+            throw new Error('Unsupported in-memory DynamoDB persistence format');
+        }
+        this.tables.clear();
+        for (const persistedTable of snapshot.tables) {
+            const table: MemoryTable = {
+                description: ValueUtils.clone(persistedTable.description),
+                items: new Map()
+            };
+            for (const persistedItem of persistedTable.items) {
+                const item = QuerySerializer.parseItem<AttributeMap, unknown>(persistedItem);
+                table.items.set(this.key(table, item), item);
+            }
+            this.tables.set(table.description.TableName!, table);
+        }
+    }
+
+    private snapshot(): MemorySnapshot {
+        return {
+            version: 1,
+            tables: Array.from(this.tables.values(), (table) => ({
+                description: ValueUtils.clone(table.description),
+                items: Array.from(table.items.values(), (item) => QuerySerializer.serialiseMap(item))
+            }))
+        };
+    }
+
+    private mutates(command: MemoryCommand): boolean {
+        return command instanceof CreateTableCommand
+            || command instanceof DeleteTableCommand
+            || command instanceof PutItemCommand
+            || command instanceof UpdateItemCommand
+            || command instanceof DeleteItemCommand
+            || command instanceof BatchWriteItemCommand
+            || command instanceof TransactWriteItemsCommand;
     }
 
     private table(name: string | undefined): MemoryTable {
@@ -285,7 +378,7 @@ export class InMemoryDynamoDB {
             return [
                 name,
                 type,
-                value instanceof Uint8Array ? Buffer.from(value).toString('base64') : value
+                value instanceof Uint8Array ? Array.from(value) : value
             ];
         }));
     }
@@ -849,9 +942,126 @@ export class InMemoryDynamoDB {
     }
 }
 
-/** Creates an isolated in-memory DynamoDB-compatible backend for tests or local execution. */
-export function createInMemoryDynamoDB(
-    tables: readonly (DynamoDBTableDefinition | CreateTableCommandInput)[] = []
-): InMemoryDynamoDB {
-    return new InMemoryDynamoDB(tables);
+class FilePersistence implements MemoryPersistence {
+    constructor(private readonly path: string) {}
+
+    async load(): Promise<MemorySnapshot | undefined> {
+        const fileSystem = await nodeFileSystem();
+        try {
+            return JSON.parse(await fileSystem.readFile(this.path, 'utf8'), reviveBinary) as MemorySnapshot;
+        } catch (error) {
+            if (isMissingFile(error)) {
+                return undefined;
+            }
+            throw error;
+        }
+    }
+
+    async save(snapshot: MemorySnapshot): Promise<void> {
+        const fileSystem = await nodeFileSystem();
+        await fileSystem.mkdir(directoryOf(this.path), {recursive: true});
+        const temporaryPath = `${this.path}.tmp`;
+        await fileSystem.writeFile(temporaryPath, JSON.stringify(snapshot, replaceBinary), 'utf8');
+        await fileSystem.rename(temporaryPath, this.path);
+    }
 }
+
+class IndexedDBPersistence implements MemoryPersistence {
+    private database?: Promise<IDBDatabase>;
+
+    constructor(private readonly name: string) {}
+
+    async load(): Promise<MemorySnapshot | undefined> {
+        const database = await this.open();
+        return this.request(database.transaction('fluentful-orm', 'readonly').objectStore('fluentful-orm').get('state'));
+    }
+
+    async save(snapshot: MemorySnapshot): Promise<void> {
+        await this.transaction(await this.open(), snapshot);
+    }
+
+    async close(): Promise<void> {
+        (await this.database)?.close();
+    }
+
+    private open(): Promise<IDBDatabase> {
+        if (this.database === undefined) {
+            if (typeof indexedDB === 'undefined') {
+                throw new Error('IndexedDB is not available in this environment');
+            }
+            this.database = new Promise((resolve, reject) => {
+                const request = indexedDB.open(this.name, 1);
+                request.onupgradeneeded = () => {
+                    request.result.createObjectStore('fluentful-orm');
+                };
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+            });
+        }
+        return this.database;
+    }
+
+    private request(request: IDBRequest<MemorySnapshot | undefined>): Promise<MemorySnapshot | undefined> {
+        return new Promise((resolve, reject) => {
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    private transaction(database: IDBDatabase, snapshot: MemorySnapshot): Promise<void> {
+        return new Promise((resolve, reject) => {
+            const transaction = database.transaction('fluentful-orm', 'readwrite');
+            transaction.objectStore('fluentful-orm').put(snapshot, 'state');
+            transaction.oncomplete = () => resolve();
+            transaction.onerror = () => reject(transaction.error);
+            transaction.onabort = () => reject(transaction.error);
+        });
+    }
+}
+
+function replaceBinary(_key: string, value: unknown): unknown {
+    return value instanceof Uint8Array ? {fluentfulBinary: Array.from(value)} : value;
+}
+
+function reviveBinary(_key: string, value: unknown): unknown {
+    if (
+        value !== null
+        && typeof value === 'object'
+        && Object.keys(value).length === 1
+        && Array.isArray((value as {fluentfulBinary?: unknown}).fluentfulBinary)
+    ) {
+        return new Uint8Array((value as {fluentfulBinary: number[]}).fluentfulBinary);
+    }
+    return value;
+}
+
+function isMissingFile(error: unknown): boolean {
+    return typeof error === 'object'
+        && error !== null
+        && (error as {code?: unknown}).code === 'ENOENT';
+}
+
+function directoryOf(path: string): string {
+    const separator = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+    return separator < 0 ? '.' : path.slice(0, separator + 1);
+}
+
+async function nodeFileSystem(): Promise<typeof import('node:fs/promises')> {
+    if (typeof process === 'undefined' || process.versions?.node === undefined) {
+        throw new Error('File persistence is only available in Node.js');
+    }
+    return Function('specifier', 'return import(specifier)')('node:fs/promises') as Promise<typeof import('node:fs/promises')>;
+}
+
+/** Creates memory-backed DynamoDB-compatible engines for memory, browser, and file storage. */
+export const createEngine = {
+    memory(tables: InitialTables = []): InMemoryDynamoDB {
+        return new InMemoryDynamoDB(tables);
+    },
+    indexDB(name = 'fluentful-orm', tables: InitialTables = []): InMemoryDynamoDB {
+        return new InMemoryDynamoDB(tables, new IndexedDBPersistence(name));
+    },
+    file(path: string, tables: InitialTables = []): InMemoryDynamoDB {
+        return new InMemoryDynamoDB(tables, new FilePersistence(path));
+    }
+};

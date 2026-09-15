@@ -103,22 +103,24 @@ The schema is used at runtime as well as compile time. Inputs, keys, filter valu
 
 ## In-memory backend
 
-Applications can inject a dependency-free, process-local backend instead of an AWS client. No server, port, credentials lookup, filesystem storage, or npm dependency is needed. Each instance owns its own tables and records.
+Applications can inject a DynamoDB-compatible engine instead of an AWS client. The existing memory engine is process-local, while file and IndexedDB engines persist the same table and record model.
 
 ```ts
-import {createInMemoryDynamoDB, defineTable, QueryBuilder} from '@fluentful/orm';
+import {createEngine, defineTable, QueryBuilder} from '@fluentful/orm';
 import {z} from 'zod';
 
-const memory = createInMemoryDynamoDB();
+const engine = createEngine.memory();
+// const engine = createEngine.file('./data/fluentful-orm.json');
+// const engine = createEngine.indexDB('my-browser-app');
 
 try {
-    await QueryBuilder.createTable('accounts', 'id', memory.db);
+    await QueryBuilder.createTable('accounts', 'id', engine.db);
 
     const accounts = defineTable({
         name: 'accounts',
         key: {partition: 'id'},
         schema: z.object({id: z.string(), credits: z.number()})
-    }).using(memory.db);
+    }).using(engine.db);
 
     await accounts.create({id: 'account-1', credits: 10}).toPromise();
     await accounts.update({id: 'account-1'})
@@ -129,15 +131,15 @@ try {
     const account = await accounts.get({id: 'account-1'}).toPromise();
     // account: {id: 'account-1', credits: 9}
 
-    memory.reset();
+    await engine.reset();
 } finally {
-    await memory.close();
+    await engine.close();
 }
 ```
 
-Pass `memory.db` into application constructors that already accept `DynamoDBClient`, or use it with the lower-level `new QueryBuilder(tableName, memory.db)`. Seed records through normal create/batch APIs. `reset()` clears records and transaction request tokens but retains table definitions; `close()` clears everything, destroys the client, and rejects later requests. Closing more than once is safe.
+Pass `engine.db` into application constructors that already accept `DynamoDBClient`, or use it with the lower-level `new QueryBuilder(tableName, engine.db)`. Seed records through normal create/batch APIs. `reset()` clears records and transaction request tokens but retains table definitions. It returns a promise so file and IndexedDB changes are durably written before it resolves. `close()` destroys the client and rejects later requests; file and IndexedDB engines keep their stored snapshot for the next instance. Closing more than once is safe.
 
-Tables must be declared before use. Supply QueryBuilder-owned `DynamoDBTableDefinition` values to `createInMemoryDynamoDB([definition, ...])` for synchronous initialisation, or use `await QueryBuilder.createTable(definition, memory.db)`. Both paths use the same validation and translation, supporting composite keys, attribute types, global/local indexes and optional index projections without AWS request fields. Existing SDK `CreateTableCommandInput` constructor inputs remain supported for compatibility. Typed `defineTable()` describes application validation and does not create storage tables. Index projections support `ALL`, `KEYS_ONLY` and `INCLUDE`; omission preserves the existing `ALL` default.
+Tables must be declared before use. Supply QueryBuilder-owned `DynamoDBTableDefinition` values as the optional second argument to `createEngine.file(path, [definition, ...])`, or to `createEngine.memory([definition, ...])` and `createEngine.indexDB(name, [definition, ...])`, for synchronous initialisation. You can also use `await QueryBuilder.createTable(definition, engine.db)`. Both paths use the same validation and translation, supporting composite keys, attribute types, global/local indexes and optional index projections without AWS request fields. Existing SDK `CreateTableCommandInput` constructor inputs remain supported for compatibility. Typed `defineTable()` describes application validation and does not create storage tables. Index projections support `ALL`, `KEYS_ONLY` and `INCLUDE`; omission preserves the existing `ALL` default.
 
 Supported QueryBuilder behaviour:
 
@@ -159,6 +161,7 @@ From this package:
 
 - `npm test` builds the package and runs the command-construction/serialization unit tests, the shared contract against memory, and fake-specific lifecycle checks. No AWS access is required.
 - `npm run test:memory` runs only the shared memory contract and fake-specific lifecycle checks.
+- `npm run test:persistence` runs the file-engine persistence tests directly.
 - `npm run test:integration` runs every shared contract test against both memory and real DynamoDB. AWS credentials and permission to create/delete temporary test tables are required. Each run creates uniquely named tables and removes them during teardown.
 
 Command-construction, mocked retry/failure, and type-validation unit tests remain separate because they inspect generated requests or deliberately inject SDK responses. Only backend-specific behaviours such as memory reset/close and unsupported-operation errors belong in the fake lifecycle suite. Real AWS execution remains necessary to catch differences the stub does not model.
