@@ -1,5 +1,9 @@
 const orm = require("@fluentful/orm");
 const { z } = require("zod");
+for (const name of ["transactGet", "typedReadTransaction", "literal", "ifNotExists", "listAppend", "plus", "minus",
+  "listTablePage", "waitForTable", "waitForTableDeleted", "updateTable", "configureTimeToLive", "describeTimeToLive"]) {
+  if (typeof orm[name] !== "function") throw new Error(`Missing CommonJS export: ${name}`);
+}
 
 const table = orm.defineTable({
   name: "operand-smoke",

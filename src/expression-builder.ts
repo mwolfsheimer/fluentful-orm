@@ -1,3 +1,5 @@
+import {compileSetOperand} from './update-expression';
+import type {SetOperand} from './update-expression';
 import {QuerySerializer} from "./query-serializer";
 import {UpdateExpressionType} from "./types";
 import type {GenericDocument, GetSelector} from "./types";
@@ -26,7 +28,7 @@ export interface ExpressionTarget {
 
 /** Accumulates DynamoDB expressions and placeholder values for one operation. */
 export class ExpressionBuilder {
-    private updates: {type: UpdateExpressionType, name: AttributePath}[] = [];
+    private updates: {type: UpdateExpressionType, name: AttributePath, expression?: string}[] = [];
     private attributeId = 0;
     private updateValueId = 0;
     private keyConditionExpression: string | undefined;
@@ -62,12 +64,22 @@ export class ExpressionBuilder {
         return predicate.negated && predicate.operator !== 'attribute_exists' ? `NOT (${expression})` : expression;
     }
 
+    hasUpdate(name: AttributePath): boolean {
+        return this.updates.some(update => pathKey(update.name) === pathKey(name));
+    }
+
     /** Adds an update action for an attribute. */
     addUpdate(type: UpdateExpressionType, name: AttributePath): void {
         const segments = pathSegments(name);
         if ((type === UpdateExpressionType.ADD || type === UpdateExpressionType.DELETE) && segments.length !== 1) throw new Error('ADD and DELETE support top-level attributes only');
         if (this.updates.some(update => pathKey(update.name) !== pathKey(name) && pathsOverlap(update.name, name))) throw new Error('Overlapping update paths');
         this.updates.push({type, name});
+    }
+
+    addAssignment(name: AttributePath, operand: SetOperand): void {
+        const compiled = compileSetOperand(operand, attribute => this.addPath(attribute), value => `:${this.addUniqueValue(value)}`);
+        this.addUpdate(UpdateExpressionType.SET, name);
+        this.updates[this.updates.length - 1].expression = compiled;
     }
 
     /** Adds or replaces the value placeholder for an update attribute. */
@@ -219,7 +231,7 @@ export class ExpressionBuilder {
         }
 
         // The last action per attribute wins; values from losing value-bearing actions are dropped.
-        const winners = new Map<string, {type: UpdateExpressionType; name: AttributePath}>();
+        const winners = new Map<string, {type: UpdateExpressionType; name: AttributePath; expression?: string}>();
 
         for (const update of this.updates) {
             winners.set(pathKey(update.name), update);
@@ -227,7 +239,7 @@ export class ExpressionBuilder {
 
         const groups = new Map<UpdateExpressionType, string[]>();
 
-        winners.forEach(({type, name}) => {
+        winners.forEach(({type, name, expression}) => {
             const valueKey = this.updateValueKeys.get(pathKey(name));
 
             if (type === UpdateExpressionType.REMOVE) {
@@ -236,7 +248,7 @@ export class ExpressionBuilder {
 
             const alias = this.addPath(name);
             const clause = type === UpdateExpressionType.SET
-                ? `${alias} = :${valueKey}`
+                ? `${alias} = ${expression ?? `:${valueKey}`}`
                 : type === UpdateExpressionType.REMOVE
                     ? alias
                     : `${alias} :${valueKey}`;

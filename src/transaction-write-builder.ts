@@ -1,3 +1,5 @@
+import {ExecutionBinding} from './execution-options';
+import type {ExecutionOptions} from './types';
 import {TransactWriteItemsCommand} from '@aws-sdk/client-dynamodb';
 import type {DynamoDBClient, TransactWriteItem, TransactWriteItemsCommandOutput} from '@aws-sdk/client-dynamodb';
 import type {QueryBuilder} from './query-builder';
@@ -14,6 +16,7 @@ export interface TransactionItemOptions {
 
 /** Mutable builder for an atomic DynamoDB TransactWriteItems request. */
 export class TransactionWriteBuilder {
+    private execution = new ExecutionBinding();
     private items: TransactWriteItem[] = [];
     private requestToken: string | undefined;
     private _logger: QueryLogger = null;
@@ -84,7 +87,8 @@ export class TransactionWriteBuilder {
     }
 
     /** Executes the transaction and caches the returned promise. */
-    toPromise(): Promise<TransactWriteItemsCommandOutput> {
+    toPromise(options: ExecutionOptions = {}): Promise<TransactWriteItemsCommandOutput> {
+        this.execution.bind(options);
         if (this.executed !== null) {
             return this.executed;
         }
@@ -100,7 +104,10 @@ export class TransactionWriteBuilder {
             ClientRequestToken: this.requestToken
         };
         this._logger && this._logger({method: 'transactWriteItems', query: JSON.stringify(input)});
-        this.executed = this.dynamoDB.send(new TransactWriteItemsCommand(input)).then((result) => {
+        this.executed = Promise.resolve().then(() => {
+            this.execution.signal?.throwIfAborted();
+            return this.dynamoDB.send(new TransactWriteItemsCommand(input), {abortSignal: this.execution.signal});
+        }).then((result) => {
             this._logger && this._logger({
                 method: 'transactWriteItems',
                 result: {count: this.items.length},

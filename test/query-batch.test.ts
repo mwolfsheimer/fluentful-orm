@@ -6,8 +6,151 @@ import {QuerySerializer} from '../src/query-serializer';
 import {Quewe} from '../src/quewe';
 import {BatchRetryError, QueryExecutor} from '../src/query-executor';
 import {createFakeDynamoDB} from './fake-dynamodb';
+import {getEventListeners} from 'node:events';
+import {abortableDelay} from '../src/execution-options';
 
 describe('query - QueryBuilder pagination and batches', () => {
+    test('removes backoff listeners on abort and normal completion', async () => {
+        const controller = new AbortController();
+        const reason = new Error('abort delay');
+        const waiting = abortableDelay(10000, controller.signal);
+        assert.equal(getEventListeners(controller.signal, 'abort').length, 1);
+        controller.abort(reason);
+        await assert.rejects(waiting, error => error === reason);
+        assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+        const completed = new AbortController();
+        await abortableDelay(0, completed.signal);
+        assert.equal(getEventListeners(completed.signal, 'abort').length, 0);
+    });
+    test('retains safe recovery work when cancelled before an unprocessed retry', async () => {
+        const controller = new AbortController();
+        const reason = new Error('stop retries');
+        const fake = createFakeDynamoDB(command => {
+            controller.abort(reason);
+            return {UnprocessedItems: {test: command.input.RequestItems.test.slice(10)}};
+        });
+        const keys = Array.from({length: 60}, (_, index) => ({id: String(index)}));
+        const result = await new QueryBuilder('test', fake.db).deleteBatchResult(keys, {concurrency: 1, signal: controller.signal});
+        assert.equal(result.completed.length, 10);
+        assert.equal(result.unprocessed.length, 15);
+        assert.equal(result.notSubmitted.length, 35);
+        assert.deepEqual(result.unknown, []);
+        assert.deepEqual(result.resumable, keys.slice(10));
+        assert.equal(result.errors[0], reason);
+        assert.equal(fake.inputs.length, 1);
+    });
+
+    test('counts missing and duplicate reads as completed while preserving service result order', async () => {
+        const fake = createFakeDynamoDB(() => ({Responses: {test: [QuerySerializer.serialiseMap({id: 'found'})]}}));
+        const keys = [{id: 'missing'}, {id: 'found'}, {id: 'found'}];
+        const outcome = await new QueryBuilder('test', fake.db).getBatchResult(keys);
+        assert.deepEqual(outcome.completed.map(work => work.index), [0, 1, 2]);
+        assert.deepEqual(outcome.results, [{id: 'found'}]);
+        assert.deepEqual(outcome.resumable, []);
+        assert.equal(fake.inputs[0].RequestItems.test.Keys.length, 2);
+    });
+
+    test('waits for in-flight chunks and retains their completed work after another chunk fails', async () => {
+        const failure = new Error('uncertain chunk');
+        let release: () => void = () => {};
+        const blocked = new Promise<void>(resolve => { release = resolve; });
+        const fake = createFakeDynamoDB(async (_command, attempt) => {
+            if (attempt === 1) { await blocked; return {}; }
+            release();
+            throw failure;
+        });
+        const outcome = await new QueryBuilder('test', fake.db).createBatchResult(
+            Array.from({length: 50}, (_, index) => ({id: String(index)})), {concurrency: 2});
+        assert.equal(outcome.completed.length, 25);
+        assert.equal(outcome.unknown.length, 25);
+        assert.equal(outcome.errors[0], failure);
+        assert.equal(outcome.results.length, 25);
+    });
+
+    test('classifies recoverable batches without retrying uncertain writes', async () => {
+        const failure = new Error('connection lost');
+        const fake = createFakeDynamoDB((_command, attempt) => {
+            if (attempt === 2) throw failure;
+            return {};
+        });
+        const documents = Array.from({length: 60}, (_, index) => ({id: String(index)}));
+        const outcome = await new QueryBuilder('test', fake.db).createBatchResult(documents, {concurrency: 1});
+        assert.equal(outcome.completed.length, 25);
+        assert.equal(outcome.unknown.length, 25);
+        assert.equal(outcome.notSubmitted.length, 10);
+        assert.equal(outcome.unprocessed.length, 0);
+        assert.deepEqual(outcome.results, documents.slice(0, 25));
+        assert.deepEqual(outcome.resumable, documents.slice(50));
+        assert.equal(outcome.errors[0], failure);
+        assert.equal(fake.inputs.length, 2);
+        outcome.resumable[0].id = 'changed';
+        assert.equal(outcome.notSubmitted[0].input['id'], '50');
+        assert.equal(documents[50].id, '50');
+    });
+
+    test('binds cancellation once and forwards the original signal outside request data', async () => {
+        const invalid = new QueryBuilder('test', createFakeDynamoDB(() => ({Items: []})).db).scan();
+        assert.throws(() => invalid.page({limit: 0, signal: new AbortController().signal}), /positive integer/);
+        await invalid.page({signal: new AbortController().signal});
+        const controller = new AbortController();
+        const fake = createFakeDynamoDB(() => ({Items: []}));
+        const query = new QueryBuilder('test', fake.db).scan();
+        const promise = query.toPromise({signal: controller.signal});
+        assert.equal(query.toPromise(), promise);
+        assert.equal(query.toPromise({signal: controller.signal}), promise);
+        assert.throws(() => query.toResponse({signal: new AbortController().signal}), /options cannot change/);
+        await promise;
+        assert.equal(fake.options[0].abortSignal, controller.signal);
+        assert.equal(fake.inputs[0].signal, undefined);
+        const aborted = new AbortController();
+        const reason = new Error('stopped');
+        aborted.abort(reason);
+        await assert.rejects(new QueryBuilder('test', fake.db).get({id: 'one'}).toPromise({signal: aborted.signal}),
+            error => error === reason);
+        assert.equal(fake.inputs.length, 1);
+        await assert.rejects(new QueryBuilder('test', fake.db).createBatch([], {signal: aborted.signal}),
+            error => error === reason);
+    });
+
+    test('stops between yielded items and before retrying unprocessed work', async () => {
+        const controller = new AbortController();
+        const fake = createFakeDynamoDB(() => ({Items: [
+            QuerySerializer.serialiseMap({id: 'one'}), QuerySerializer.serialiseMap({id: 'two'})
+        ]}));
+        const iterator = new QueryBuilder('test', fake.db).scan().items({signal: controller.signal})[Symbol.asyncIterator]();
+        assert.deepEqual((await iterator.next()).value, {id: 'one'});
+        const reason = new Error('stop iterator');
+        controller.abort(reason);
+        await assert.rejects(iterator.next(), error => error === reason);
+        assert.equal(fake.inputs.length, 1);
+
+        const retryController = new AbortController();
+        const retryFake = createFakeDynamoDB(command => {
+            retryController.abort(reason);
+            return {UnprocessedItems: command.input.RequestItems};
+        });
+        await assert.rejects(new QueryBuilder('test', retryFake.db).createBatch(
+            Array.from({length: 60}, (_, index) => ({id: String(index)})),
+            {concurrency: 1, signal: retryController.signal}), error => error === reason);
+        assert.equal(retryFake.inputs.length, 1);
+    });
+
+    test('preserves page-local evaluation metadata without inventing absent counts', async () => {
+        const capacity = {TableName: 'test', CapacityUnits: 2};
+        const fake = createFakeDynamoDB((_command, attempt) => attempt === 1
+            ? {Items: [], Count: 0, ScannedCount: 8, ConsumedCapacity: capacity,
+                LastEvaluatedKey: QuerySerializer.serialiseMap({id: 'next'})}
+            : {Items: []});
+        const iterator = new QueryBuilder('test', fake.db).scan().returnCapacity().pages()[Symbol.asyncIterator]();
+        const first = (await iterator.next()).value;
+        assert.equal(first.count, 0);
+        assert.equal(first.scannedCount, 8);
+        assert.deepEqual(first.consumedCapacity, capacity);
+        first.consumedCapacity.CapacityUnits = 99;
+        assert.equal(capacity.CapacityUnits, 2);
+        assert.deepEqual((await iterator.next()).value, {items: [], cursor: null});
+    });
+
     test('treats empty service cursors as terminal in every read mode', async () => {
         for (const method of ['page', 'pages', 'items', 'count', 'all']) {
             const fake = createFakeDynamoDB((_command, attempt) => {
@@ -15,7 +158,7 @@ describe('query - QueryBuilder pagination and batches', () => {
                 return {Items: [], Count: 0, LastEvaluatedKey: {}};
             });
             const query = new QueryBuilder('test', fake.db).scan();
-            if (method === 'page') assert.deepEqual(await query.page(), {items: [], cursor: null});
+            if (method === 'page') assert.deepEqual(await query.page(), {items: [], cursor: null, count: 0});
             else if (method === 'pages' || method === 'items') {
                 for await (const _entry of query[method]()) {}
             } else if (method === 'count') assert.equal(await query.count().toPromise(), 0);

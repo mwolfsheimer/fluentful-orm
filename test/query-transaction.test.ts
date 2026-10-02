@@ -1,9 +1,53 @@
 import assert from 'node:assert/strict';
+import {transactGet} from '../src/transaction-read-builder';
 import {describe, test} from 'node:test';
 import {QueryBuilder} from '../src/query-builder';
 import {createFakeDynamoDB} from './fake-dynamodb';
 
+test('preserves transactional-read failures and freezes execution options', async () => {
+    const reason = new Error('cancel read');
+    const controller = new AbortController();
+    controller.abort(reason);
+    const fake = createFakeDynamoDB(() => ({Responses: [{}]}));
+    const aborted = transactGet(fake.db).add('test', {id: 'one'});
+    const promise = aborted.toPromise({signal: controller.signal});
+    await assert.rejects(promise, error => error === reason);
+    assert.equal(aborted.toPromise(), promise);
+    assert.equal(fake.inputs.length, 0);
+    assert.throws(() => aborted.returnCapacity(), /executed/);
+    assert.throws(() => aborted.logger(() => {}), /executed/);
+    assert.throws(() => transactGet(fake.db).add('test', {id: true} as any), /key/i);
+    const malformed = createFakeDynamoDB(() => ({Responses: []}));
+    const read = transactGet(malformed.db).add('test', {id: 'one'});
+    await assert.rejects(read.toPromise(), /Malformed/);
+    await assert.rejects(read.toResponse(), /Malformed/);
+    assert.equal(malformed.inputs.length, 1);
+    const failure = new Error('service failure');
+    const failing = createFakeDynamoDB(() => { throw failure; });
+    const request = transactGet(failing.db).add('test', {id: 'one'});
+    await assert.rejects(request.toPromise(), error => error === failure);
+    await assert.rejects(request.toResponse(), error => error === failure);
+    assert.equal(failing.inputs.length, 1);
+});
 describe('query - QueryBuilder transactions', () => {
+    test('reads ordered transaction results with projections and cached execution', async () => {
+        const fake = createFakeDynamoDB(() => ({Responses: [{Item: {value: {N: '2'}}}, {}, {Item: {}}]}));
+        const transaction = QueryBuilder.transactGet(fake.db)
+            .add('test', {id: 'one'}, ['value']).add('test', {id: 'missing'}).add('test', {id: 'empty'}, ['value']);
+        const controller = new AbortController();
+        const promise = transaction.toPromise({signal: controller.signal});
+        assert.equal(transaction.toPromise(), promise);
+        assert.deepEqual(await promise, [{value: 2}, null, {}]);
+        assert.equal(fake.options[0].abortSignal, controller.signal);
+        assert.equal(fake.inputs[0].TransactItems.length, 3);
+        assert.equal(fake.inputs[0].TransactItems[0].Get.ProjectionExpression, '#value');
+        assert.throws(() => transaction.add('test', {id: 'late'}), /after a transaction/);
+        assert.throws(() => QueryBuilder.transactGet(fake.db).toPromise(), /at least one/);
+        const full = QueryBuilder.transactGet(fake.db);
+        for (let index = 0; index < 100; index++) full.add('test', {id: String(index)});
+        assert.throws(() => full.add('test', {id: 'overflow'}), /at most 100/);
+    });
+
     test('snapshots retained builders when adding transaction items', async () => {
         const fake = createFakeDynamoDB();
         const builder = new QueryBuilder('test', fake.db);

@@ -17,6 +17,45 @@ function deleteIndexedDB(name: string): Promise<void> {
     });
 }
 
+for (const storage of ['file', 'browser'] as const) {
+    test(`${storage} preserves ordered multi-attribute index metadata`, async context => {
+        const directory = await mkdtemp(join(tmpdir(), 'fluentful-multi-'));
+        const name = `fluentful-multi-${Date.now()}-${Math.random()}`;
+        const engines: Array<{close(): Promise<void>}> = [];
+        context.after(async () => {
+            await Promise.all(engines.map(engine => engine.close()));
+            await rm(directory, {recursive: true, force: true});
+            if (storage === 'browser') await deleteIndexedDB(name);
+        });
+        const open = () => {
+            const engine = storage === 'file' ? createEngine.file(join(directory, 'state.json')) : createEngine.browser(name);
+            engines.push(engine);
+            return engine;
+        };
+        const definition = {name: 'records', key: {partition: 'id'},
+            attributes: {id: 'S', tenant: 'S', region: 'N', rank: 'N', token: 'B'},
+            indexes: {multi: {kind: 'global', partition: ['tenant', 'region'], sort: ['rank', 'token']},
+                scalar: {kind: 'global', partition: 'tenant'}}} as const;
+        const first = open();
+        await QueryBuilder.createTable(definition, first.db);
+        const record = {id: 'one', tenant: 't', region: 1, rank: 2, token: new Uint8Array([1])};
+        await new QueryBuilder('records', first.db).create(record).toPromise();
+        await first.close();
+        const restored = open();
+        assert.deepEqual(await QueryBuilder.getTableDefinition('records', restored.db), definition);
+        assert.deepEqual(await new QueryBuilder('records', restored.db).query({tenant: 't', region: 1},
+            {name: 'multi', ...definition.indexes.multi}).sortKey('rank').eq(2).toPromise(), [record]);
+        await QueryBuilder.updateTable('records', restored.db, {deleteIndex: 'multi'});
+        await QueryBuilder.updateTable('records', restored.db, {createIndex: {name: 'replacement',
+            definition: definition.indexes.multi, attributes: {region: 'N', rank: 'N', token: 'B'}}});
+        await restored.close();
+        const reopened = open();
+        assert.deepEqual(await new QueryBuilder('records', reopened.db).query({tenant: 't', region: 1},
+            {name: 'replacement', ...definition.indexes.multi}).toPromise(), [record]);
+        assert.equal((await QueryBuilder.getTableDefinition('records', reopened.db))?.indexes['multi'], undefined);
+    });
+}
+
 test('file engines reject competing writers and recover from corrupt snapshots', async (context) => {
     const directory = await mkdtemp(join(tmpdir(), 'fluentful-orm-errors-'));
     const path = join(directory, 'state.json');
@@ -251,6 +290,8 @@ test('failed IndexedDB saves restore every mutation and transaction token', asyn
         () => transaction().toPromise(),
         () => QueryBuilder.createTable('temporary', 'id', engine.db),
         () => QueryBuilder.deleteTable('records', engine.db),
+        () => QueryBuilder.updateTable('records', engine.db, {createIndex: {name: 'value',
+            definition: {kind: 'global', partition: 'value'}, attributes: {value: 'N'}}}),
         () => engine.reset()
     ];
     const failure = new Error('Injected save failure');
@@ -260,7 +301,16 @@ test('failed IndexedDB saves restore every mutation and transaction token', asyn
         mock.mock.restore();
         assert.deepEqual(await QueryBuilder.listTables(engine.db), ['records']);
         assert.deepEqual(await records().scan().toPromise(), [{id: 'one', value: 1}]);
+        assert.deepEqual((await QueryBuilder.getTableDefinition('records', engine.db))?.indexes, {});
     }
+    await QueryBuilder.updateTable('records', engine.db, {createIndex: {name: 'value',
+        definition: {kind: 'global', partition: 'value'}, attributes: {value: 'N'}}});
+    const deletion = context.mock.method(IDBObjectStore.prototype, 'put', () => { throw failure; });
+    await assert.rejects(QueryBuilder.updateTable('records', engine.db, {deleteIndex: 'value'}), error => error === failure);
+    deletion.mock.restore();
+    assert.deepEqual((await QueryBuilder.getTableDefinition('records', engine.db))?.indexes,
+        {value: {kind: 'global', partition: 'value'}});
+    await QueryBuilder.updateTable('records', engine.db, {deleteIndex: 'value'});
     await transaction().toPromise();
     await engine.close();
     const restored = createEngine.browser(name);

@@ -1,6 +1,6 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { BatchRetryError, createEngine, defineTable, path, ref, QueryBuilder } from "@fluentful/orm";
-import type { ExpressionAttributeType, TypedPredicateScope } from "@fluentful/orm";
+import { BatchRetryError, createEngine, defineTable, path, ref, QueryBuilder, plus, listAppend, typedReadTransaction } from "@fluentful/orm";
+import type { AttributeReference, ExpressionAttributeType, TypedPredicateScope } from "@fluentful/orm";
 import { z } from "zod";
 
 const userSchema = z.object({
@@ -70,13 +70,36 @@ async function verifyBrowserPersistence(): Promise<void> {
     .create({ id: "transformed", value: "3", count: 7 }).returningAllOld().toPromise();
   if (previous !== null || typeof BatchRetryError !== "function") throw new Error("Packaged write contracts are incorrect.");
   await transformed.update({ id: "transformed" }).with({ value: "4" }).toPromise();
+  const sparse = await transformed.update({ id: "transformed" }).assign("count", fields => plus(fields.ref("count"), 1))
+    .returningUpdatedNew().toPromise();
+  if (JSON.stringify(sparse) !== JSON.stringify({ count: 8 })) throw new Error("Sparse update image is incorrect.");
   const typed = await transformed.get({ id: "transformed" }).toPromise();
-  if (typed?.value !== 4 || typed.count !== 7) throw new Error("Typed browser round trip failed.");
+  if (typed?.value !== 4 || typed.count !== 8) throw new Error("Typed browser round trip failed.");
+  const recovery = await transformed.getBatchResult([{ id: "transformed" }, { id: "missing" }], { select: ["count"] });
+  if (recovery.completed.length !== 2 || recovery.results[0].count !== 8 || recovery.resumable.length) throw new Error("Recoverable browser read failed.");
   await new QueryBuilder("browser-records", first.db).create({
     id: "record-1",
     bytes: new Uint8Array([1, 2, 3]),
     profile: { city: "London" }, labels: ["first", "second"]
   }).toPromise();
+  await new QueryBuilder("browser-records", first.db).update({ id: "record-1" })
+    .assign("labels", listAppend(ref("labels") as AttributeReference<string[]>, ["third"])).returningNone().toPromise();
+  const transaction = await QueryBuilder.transactGet(first.db).add("browser-records", { id: "transformed" }, ["count"])
+    .add("browser-records", { id: "missing" }).toPromise();
+  if (transaction[0]?.count !== 8 || transaction[1] !== null) throw new Error("Atomic browser reads failed.");
+  const typedDefinition = defineTable({ name: "browser-records", key: { partition: "id" },
+    schema: z.object({ id: z.string(), value: z.number(), count: z.number() }) });
+  const tuple = await typedReadTransaction(first.db).add(typedDefinition, { id: "transformed" }, ["value"]).toPromise();
+  if (tuple[0]?.value !== 4) throw new Error("Typed atomic browser read failed.");
+  await new QueryBuilder("browser-records", first.db).update({ id: "record-1" })
+    .with({ tenant: "one", region: 1, rank: 2, token: new Uint8Array([3]) }).returningNone().toPromise();
+  await QueryBuilder.updateTable("browser-records", first.db, { createIndex: {
+    name: "multi", definition: { kind: "global", partition: ["tenant", "region"], sort: ["rank", "token"] },
+    attributes: { tenant: "S", region: "N", rank: "N", token: "B" }
+  } });
+  await QueryBuilder.waitForTable("browser-records", first.db);
+  const tablePage = await QueryBuilder.listTablePage(first.db, { limit: 1 });
+  if (tablePage.names[0] !== "browser-records") throw new Error("Browser administration paging failed.");
   await first.close();
 
   const restored = createEngine.browser(databaseName);
@@ -86,6 +109,13 @@ async function verifyBrowserPersistence(): Promise<void> {
   const projected = await new QueryBuilder("browser-records", restored.db).get({ id: "record-1" })
     .select(path("profile", "city"), path("labels", 1))
     .toPromise<{ profile: { city: string }; labels: string[] }>();
+  const indexed = defineTable({ name: "browser-records", key: { partition: "id" },
+    schema: z.object({ id: z.string(), tenant: z.string(), region: z.number(), rank: z.number(), token: z.instanceof(Uint8Array) }),
+    indexes: { multi: { kind: "global", partition: ["tenant", "region"], sort: ["rank", "token"] } }
+  }).using(restored.db);
+  const matches = await indexed.index("multi").query({ tenant: "one", region: 1 })
+    .sortKey("rank").eq(2).sortKey("token").beginsWith(new Uint8Array([3])).toPromise();
+  if (matches.length !== 1 || matches[0].id !== "record-1") throw new Error("Browser multi-key index did not persist.");
   await restored.close();
   if (!(record?.bytes instanceof Uint8Array) || record.bytes.length !== 3) {
     throw new Error("IndexedDB record did not persist across engine instances.");

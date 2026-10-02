@@ -76,11 +76,11 @@ async function verifyBrowser() {
       try {
         const page = await context.newPage();
         const errors = [];
-        page.on("pageerror", error => errors.push(error.message));
+        page.on("pageerror", error => errors.push({name: error.name, message: error.message, stack: error.stack}));
         await page.goto(`http://127.0.0.1:${server.address().port}/browser.html`);
-        await page.waitForFunction(() => document.body.dataset.browserTest !== undefined);
+        await page.waitForFunction(() => ["passed", "failed"].includes(document.body.dataset.browserTest));
         const result = await page.locator("body").getAttribute("data-browser-test");
-        if (result !== "passed" || errors.length) throw new Error(`${await page.locator("body").innerText()}\n${errors.join("\n")}`);
+        if (result !== "passed" || errors.length) throw new Error(JSON.stringify({result, text: await page.locator("body").innerText(), errors}, null, 2));
         console.log(`Chromium IndexedDB smoke passed (${viewport.width}x${viewport.height})`);
       } finally { await context.close(); }
     }

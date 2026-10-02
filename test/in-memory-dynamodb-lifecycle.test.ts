@@ -12,6 +12,7 @@ import {
     ScanCommand,
     UpdateTimeToLiveCommand
 } from '@aws-sdk/client-dynamodb';
+import {UpdateItemCommand} from '@aws-sdk/client-dynamodb';
 import {QuerySerializer} from '../src/query-serializer';
 import {createEngine, QueryBuilder} from '../src/index';
 
@@ -24,6 +25,48 @@ function fixture(context: TestContext) {
     context.after(() => backend.close());
     return {backend, query: () => new QueryBuilder('records', backend.db)};
 }
+
+test('rejects malformed SET branches and nested arithmetic atomically', async context => {
+    const {backend, query} = fixture(context);
+    await query().create({id: 'one', count: 1}).toPromise();
+    for (const UpdateExpression of ['SET #count = :one + :one + :one',
+        'SET #count = if_not_exists(#count, unsupported(:one))', 'SET #count = if_not_exists(#count, :missing)']) {
+        await assert.rejects(backend.db.send(new UpdateItemCommand({TableName: 'records', Key: {id: {S: 'one'}},
+            UpdateExpression, ExpressionAttributeNames: {'#count': 'count'}, ExpressionAttributeValues: {':one': {N: '1'}}})), {name: 'ValidationException'});
+    }
+    assert.deepEqual(await query().get({id: 'one'}).toPromise(), {id: 'one', count: 1});
+});
+
+test('rejects aborted queued writes without applying them', async context => {
+    const {backend, query} = fixture(context);
+    const controller = new AbortController();
+    const reason = new Error('cancel queued write');
+    const accepted = query().create({id: 'accepted'}).toPromise();
+    const queued = backend.db.send(new PutItemCommand({TableName: 'records', Item: {id: {S: 'cancelled'}}}),
+        {abortSignal: controller.signal});
+    controller.abort(reason);
+    await assert.rejects(queued, error => error === reason);
+    await accepted;
+    assert.equal(await query().get({id: 'cancelled'}).toPromise(), null);
+    assert.deepEqual(await query().get({id: 'accepted'}).toPromise(), {id: 'accepted'});
+});
+
+test('keeps index lifecycle changes atomic and rejects service-only simulation', async context => {
+    const {backend, query} = fixture(context);
+    await query().create({id: 'one', category: 1}).toPromise();
+    await assert.rejects(QueryBuilder.updateTable('records', backend.db, {createIndex: {name: 'category',
+        definition: {kind: 'global', partition: 'category'}, attributes: {category: 'S'}}}), {name: 'ValidationException'});
+    assert.deepEqual((await QueryBuilder.getTableDefinition('records', backend.db))?.indexes, {});
+    assert.deepEqual(await query().get({id: 'one'}).toPromise(), {id: 'one', category: 1});
+    await assert.rejects(QueryBuilder.configureTimeToLive('records', 'expiresAt', true, backend.db), /Unsupported/);
+    await assert.rejects(QueryBuilder.createTable('capacity', 'id', backend.db,
+        {billingMode: 'PROVISIONED', throughput: {read: 1, write: 1}}), /not simulated/);
+    await assert.rejects(QueryBuilder.updateTable('records', backend.db,
+        {billingMode: 'PROVISIONED', throughput: {read: 1, write: 1}}), /not simulated/);
+    assert.deepEqual(await QueryBuilder.listTablePage(backend.db, {limit: 1}), {names: ['records'], cursor: null});
+    await QueryBuilder.waitForTable('records', backend.db);
+    await QueryBuilder.waitForTableDeleted('missing', backend.db);
+});
 
 test('expires transaction tokens exactly at ten minutes and does not cache failures', async context => {
     const {backend, query} = fixture(context);

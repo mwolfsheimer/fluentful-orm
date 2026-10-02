@@ -1,3 +1,7 @@
+import type {SetOperand} from './update-expression';
+import {isUpdateExpression} from './update-expression';
+import {ExecutionBinding} from './execution-options';
+import type {ExecutionOptions} from './types';
 import {ConditionalCheckFailedException} from "@aws-sdk/client-dynamodb";
 import type {DynamoDBClient, TransactWriteItem} from "@aws-sdk/client-dynamodb";
 import type {TableDescription} from "@aws-sdk/client-dynamodb";
@@ -8,10 +12,13 @@ import type {AttributePath} from './document-path';
 import {collectPredicates, predicateComparison} from './predicate';
 import type {PredicateCallback} from './predicate';
 import {QueryExecutor} from "./query-executor";
+import type {BatchObserver, BatchRequestItems} from './query-executor';
+import type {BatchOutcome} from './types';
 import {QueryRequestState} from "./query-request-state";
-import {QueryTableAdmin} from "./query-table-admin";
-import type {DynamoDBTableDefinition} from "./query-table-admin";
+import {QueryTableAdmin, keyComponents} from "./query-table-admin";
+import type {DynamoDBTableDefinition, DynamoDBIndexDefinition, TablePageOptions, TablePage, TableWaitOptions, TableCreateOptions} from "./query-table-admin";
 import {QuerySerializer} from "./query-serializer";
+import {TransactionReadBuilder} from './transaction-read-builder';
 import {TransactionWriteBuilder} from "./transaction-write-builder";
 
 import type {TransactionItemOptions} from "./transaction-write-builder";
@@ -27,6 +34,7 @@ let requestId = '0';
 
 /** Mutable low-level DynamoDB builder for untyped CRUD, reads, batches, and transactions. */
 export class QueryBuilder {
+    private execution = new ExecutionBinding();
     private expressions = new ExpressionBuilder();
     private request = new QueryRequestState();
     private _hardLimit: number | null = null;
@@ -42,12 +50,15 @@ export class QueryBuilder {
     private _count = false;
     private queryKeys = new Set<string>();
     private sortKeyAdded = false;
+    private indexSortFields: readonly string[] | null = null;
+    private queryIndex: {name: string; kind: IndexKind} | null = null;
+    private indexSortPosition = 0;
 
     /** Creates a builder for one table and optionally supplies a result parser. */
     constructor(
         private tableName: string,
         private dynamoDB: DynamoDBClient,
-        private documentParser: null | ((document: unknown, projection?: readonly AttributePath[] | null) => GenericDocument<any>) = null,
+        private documentParser: null | ((document: unknown, projection?: readonly AttributePath[] | null, partial?: boolean) => GenericDocument<any>) = null,
         private inputParser = documentParser
     ) {}
 
@@ -67,6 +78,14 @@ export class QueryBuilder {
         }
 
         return this.updateWithQuery();
+    }
+
+    private assign(attribute: AttributePath, operand: SetOperand): UpdateSubQuery {
+        if (!isAttributeReference(operand) && !isUpdateExpression(operand)) throw new Error('assign requires a structured SET operand');
+        if (this.request.hasKey(pathSegments(attribute)[0] as string)) throw new Error('Primary key attributes cannot be updated');
+        this.expressions.addAssignment(attribute, operand);
+        this.applyModifiedTimestamp();
+        return this.updateSubQuery();
     }
 
     private set_set(attribute: AttributePath): SetSubQuery {
@@ -92,7 +111,7 @@ export class QueryBuilder {
     }
 
     private applyUpdate(type: UpdateExpressionType, attribute: AttributePath, value?: unknown): UpdateSubQuery {
-        if (isAttributeReference(value)) throw new Error('Stored references are not supported in update assignments');
+        if (isAttributeReference(value) || isUpdateExpression(value)) throw new Error('Structured operands require assign, not literal update assignments');
         const segments = pathSegments(attribute);
         if (this.request.hasKey(segments[0] as string)) throw new Error('Primary key attributes cannot be updated');
         if ((type === UpdateExpressionType.ADD || type === UpdateExpressionType.DELETE) && segments.length !== 1) {
@@ -107,7 +126,7 @@ export class QueryBuilder {
     }
 
     private applyModifiedTimestamp(): void {
-        if (!this._writeTimestamps) {
+        if (!this._writeTimestamps || this.expressions.hasUpdate('modifiedAt')) {
             return;
         }
 
@@ -121,6 +140,14 @@ export class QueryBuilder {
             ...this.conditionFailureReturnQuery(() => this.updateSubQuery()),
             toResult: this.toResult.bind(this),
             ...this.predicateChain(() => this.updateSubQuery(), false),
+            returningUpdatedNew: () => {
+                this.request.setUpdateReturnValues('UPDATED_NEW');
+                return this.updateSubQuery();
+            },
+            returningUpdatedOld: () => {
+                this.request.setUpdateReturnValues('UPDATED_OLD');
+                return this.updateSubQuery();
+            },
             returningAllNew: this.updateReturningAllNew.bind(this),
             returningAllOld: this.updateReturningAllOld.bind(this),
             returningNone: this.updateReturningNone.bind(this),
@@ -132,6 +159,7 @@ export class QueryBuilder {
                 this.returnItemCollectionMetrics();
                 return this.updateSubQuery();
             },
+            assign: this.assign.bind(this),
             set: this.set_set.bind(this),
             remove: this.set_remove.bind(this),
             add: this.set_add.bind(this),
@@ -207,8 +235,8 @@ export class QueryBuilder {
                     builder.returnItemCollectionMetrics();
                 }
             }
-            return builder.toPromise<T[]>();
-        })
+            return builder.toPromise<T[]>(typeof options === 'boolean' ? {} : options);
+        }, typeof options === 'boolean' ? undefined : options.signal)
             .then((result) => result.flat(1) as T[]);
     }
 
@@ -255,8 +283,8 @@ export class QueryBuilder {
                     builder.returnItemCollectionMetrics();
                 }
             }
-            return builder.toPromise();
-        }).then(() => undefined);
+            return builder.toPromise(typeof options === 'boolean' ? {} : options);
+        }, typeof options === 'boolean' ? undefined : options.signal).then(() => undefined);
     }
 
     /** Starts an UpdateItem operation for the supplied primary key. */
@@ -326,8 +354,98 @@ export class QueryBuilder {
                 .timestamps(this._writeTimestamps)
                 .getBatchWorker(chunk, readConsistency, batchOptions.select);
             builder.returnCapacity(batchOptions.returnConsumedCapacity);
-            return builder.toPromise<T[]>();
-        }).then((result) => result.flat(1));
+            return builder.toPromise<T[]>(typeof options === 'boolean' ? {} : options);
+        }, batchOptions.signal).then((result) => result.flat(1));
+    }
+
+    /** Reads batches with aggregate recovery information; missing records count as completed work. */
+    public getBatchResult<T>(docs: GetDocumentWith[], options: BatchGetOptions = {}): Promise<BatchOutcome<GetDocumentWith, T>> {
+        return this.recoverBatch<GetDocumentWith, T>('get', docs, options);
+    }
+
+    /** Writes batches without automatically retrying work whose service outcome is unknown. */
+    public createBatchResult<T = CreateDocumentWith>(docs: CreateDocumentWith[], options: BatchWriteOptions = {}): Promise<BatchOutcome<CreateDocumentWith, T>> {
+        return this.recoverBatch<CreateDocumentWith, T>('create', docs, options);
+    }
+
+    /** Deletes batches while retaining confirmed, unprocessed, unsent, and uncertain work. */
+    public deleteBatchResult(docs: DeleteDocumentWith[], options: BatchWriteOptions = {}): Promise<BatchOutcome<DeleteDocumentWith, never>> {
+        return this.recoverBatch<DeleteDocumentWith, never>('delete', docs, options);
+    }
+
+    private async recoverBatch<TInput extends GetDocumentWith | CreateDocumentWith, TResult>(
+        kind: 'get' | 'create' | 'delete', docs: TInput[], options: BatchGetOptions & BatchWriteOptions
+    ): Promise<BatchOutcome<TInput, TResult>> {
+        options = {...options, select: ValueUtils.clone(options.select)};
+        const concurrency = this.batchConcurrency(options);
+        const original = ValueUtils.clone(docs);
+        let prepared: CreateDocumentWith[] = ValueUtils.clone(docs);
+        if (kind === 'create') {
+            if (this._writeTimestamps) {
+                const now = Date.now();
+                prepared.forEach(document => { document['createdAt'] = now; });
+            }
+            if (this.inputParser !== null) prepared = prepared.map(document => this.inputParser!(document));
+        }
+        const encoded = prepared.map(document => QuerySerializer.serialiseMap(document));
+        const states: Array<'completed' | 'unprocessed' | 'notSubmitted' | 'unknown'> = docs.map(() => 'notSubmitted');
+        const work: {index: number; indices: number[]}[] = [];
+        encoded.forEach((document, index) => {
+            const duplicate = kind === 'get' ? work.find(entry => ValueUtils.equals(encoded[entry.index], document)) : undefined;
+            if (duplicate) duplicate.indices.push(index);
+            else work.push({index, indices: [index]});
+        });
+        const results: TResult[] = [];
+        const errors: unknown[] = [];
+        const entries = (requests: BatchRequestItems): unknown[] => {
+            const table = requests[this.tableName];
+            return table === undefined ? [] : Array.isArray(table) ? table : table.Keys ?? [];
+        };
+        const requestFor = (index: number): unknown => kind === 'get' ? encoded[index]
+            : kind === 'create' ? {PutRequest: {Item: encoded[index]}} : {DeleteRequest: {Key: encoded[index]}};
+        try {
+            await runBatchChunks(work, kind === 'get' ? 100 : 25, concurrency, async chunk => {
+                const builder = new QueryBuilder(this.tableName, this.dynamoDB, this.documentParser, this.inputParser).logger(this._logger);
+                if (kind === 'get') builder.getBatchWorker(chunk.map(entry => encoded[entry.index]), options.consistentRead, options.select);
+                else if (kind === 'create') builder.createBatchWorker(chunk.map(entry => prepared[entry.index]));
+                else builder.deleteBatchWorker(chunk.map(entry => prepared[entry.index]));
+                builder.returnCapacity(options.returnConsumedCapacity);
+                if (kind !== 'get' && options.returnItemCollectionMetrics === 'SIZE') builder.returnItemCollectionMetrics();
+                builder.execution.bind(options);
+                const observer: BatchObserver = (submitted, unprocessed) => {
+                    const sent = entries(submitted);
+                    const remaining = unprocessed === undefined ? undefined : entries(unprocessed);
+                    for (const entry of chunk) {
+                        const request = requestFor(entry.index);
+                        if (!sent.some(candidate => ValueUtils.equals(candidate, request))) continue;
+                        const state = remaining === undefined ? 'unknown'
+                            : remaining.some(candidate => ValueUtils.equals(candidate, request)) ? 'unprocessed' : 'completed';
+                        entry.indices.forEach(index => { states[index] = state; });
+                    }
+                };
+                const executor = builder.createExecutor(observer);
+                try {
+                    await executor.execute();
+                } catch (error) {
+                    errors.push(error);
+                    throw error;
+                } finally {
+                    if (kind === 'get') results.push(...executor.batchResults<TResult>());
+                }
+            }, options.signal);
+        } catch (error) {
+            if (!errors.includes(error)) errors.push(error);
+        }
+        if (kind === 'create') prepared.forEach((document, index) => {
+            if (states[index] === 'completed') results.push(ValueUtils.clone(document) as TResult);
+        });
+        const outcome: BatchOutcome<TInput, TResult> = {completed: [], unprocessed: [], notSubmitted: [], unknown: [], results, errors, resumable: []};
+        original.forEach((input, index) => {
+            const state = states[index];
+            outcome[state].push({index, input: ValueUtils.clone(input)});
+            if (state === 'unprocessed' || state === 'notSubmitted') outcome.resumable.push(ValueUtils.clone(input));
+        });
+        return outcome;
     }
 
     private batchConcurrency(options: BatchOptions | boolean): number {
@@ -343,6 +461,9 @@ export class QueryBuilder {
 
     /** Selects a secondary index for the current query or scan operation. */
     public usingIndex(index: string, kind: IndexKind = 'global'): SubQuery {
+        if (this.queryIndex !== null && (this.queryIndex.name !== index || this.queryIndex.kind !== kind)) {
+            throw new Error('A schema-aware query cannot change its index');
+        }
         this.request.setIndex(index, kind);
 
         return this.request.isScan() ? this.scanResult() as unknown as SubQuery : this.subQuery();
@@ -484,11 +605,27 @@ export class QueryBuilder {
     }
 
     /** Starts a Query operation using equality conditions for the supplied partition-key document. */
-    public query(doc: QueryDocument): Query {
+    public query(doc: QueryDocument, index?: DynamoDBIndexDefinition & {name: string}): Query {
+        if (index !== undefined) {
+            const partition = keyComponents(index.partition), sort = keyComponents(index.sort);
+            const fields = [...partition, ...sort];
+            if (!['global', 'local'].includes(index.kind) || partition.length < 1 || partition.length > 4 || sort.length > 4
+                || (index.sort !== undefined && sort.length === 0) || fields.some(field => typeof field !== 'string' || !field)
+                || new Set(fields).size !== fields.length
+                || (index.kind === 'local' && (typeof index.partition !== 'string' || typeof index.sort !== 'string'))) {
+                throw new Error('Invalid query index definition');
+            }
+            if (Object.keys(doc).length !== partition.length || partition.some(field => !Object.prototype.hasOwnProperty.call(doc, field))) {
+                throw new Error('Index query requires every partition component and no other fields');
+            }
+            this.indexSortFields = [...sort];
+            this.queryIndex = {name: index.name, kind: index.kind};
+        }
         this.request.startQuery(this.tableName, false);
+        if (index !== undefined) this.request.setIndex(index.name, index.kind);
 
         const keys = Object.keys(doc);
-        if (keys.length < 1 || keys.length > 2) {
+        if (index === undefined && (keys.length < 1 || keys.length > 2)) {
             throw new Error('Query requires one partition key and at most one sort key');
         }
         for (const key of keys) {
@@ -496,7 +633,7 @@ export class QueryBuilder {
             this.expressions.addKeyCondition(key, '=', doc[key]);
             this.queryKeys.add(key);
         }
-        this.sortKeyAdded = keys.length === 2;
+        this.sortKeyAdded = index === undefined && keys.length === 2;
 
         return {
             limit: this.queryLimit.bind(this),
@@ -529,7 +666,7 @@ export class QueryBuilder {
                 assertDynamoKeyValue(upper, true);
                 const order = compareDynamoValues(lower, upper);
                 if (order === null || order > 0) throw new Error('Sort-key range requires matching types and ordered bounds');
-                this.registerSortKey(attribute);
+                this.registerSortKey(attribute, 'BETWEEN');
                 this.expressions.addKeyBetween(attribute, lower, upper);
                 return this.queryResult();
             },
@@ -538,14 +675,23 @@ export class QueryBuilder {
                     throw new Error('Sort-key prefix requires a string or binary value');
                 }
                 assertDynamoKeyValue(value, true);
-                this.registerSortKey(attribute);
+                this.registerSortKey(attribute, 'begins_with');
                 this.expressions.addKeyBeginsWith(attribute, value);
                 return this.queryResult();
             }
         };
     }
 
-    private registerSortKey(attribute: string): void {
+    private registerSortKey(attribute: string, operator: string): void {
+        if (this.indexSortFields !== null) {
+            if (this.sortKeyAdded || attribute !== this.indexSortFields[this.indexSortPosition]) {
+                throw new Error('Index sort conditions require an ordered contiguous prefix with any range condition last');
+            }
+            this.indexSortPosition++;
+            this.sortKeyAdded = operator !== '=';
+            this.queryKeys.add(attribute);
+            return;
+        }
         if (this.sortKeyAdded || this.queryKeys.has(attribute)) {
             throw new Error('Query supports at most one sort-key predicate, separate from the partition key');
         }
@@ -555,7 +701,7 @@ export class QueryBuilder {
 
     private addQuerySortKey(attribute: string, operator: string, value: string | number | Binary): Query {
         assertDynamoKeyValue(value, true);
-        this.registerSortKey(attribute);
+        this.registerSortKey(attribute, operator);
         this.expressions.addKeyComparison(attribute, operator, value);
         return this.queryResult();
     }
@@ -689,6 +835,7 @@ export class QueryBuilder {
     private updateQuery(): UpdateQuery {
         return {
             with: this.with.bind(this),
+            assign: this.assign.bind(this),
             set: this.set_set.bind(this),
             remove: this.set_remove.bind(this),
             add: this.set_add.bind(this),
@@ -816,12 +963,14 @@ export class QueryBuilder {
 
     private page<T>(options: PageOptions = {}): Promise<QueryPage<T>> {
         if (this._executed !== null) {
+            this.execution.bind(options);
             if (this._executionMode !== 'page') {
                 throw new Error('QueryBuilder operations can only be executed once');
             }
             return this._executed as Promise<QueryPage<T>>;
         }
         const cursor = this.applyPageOptions(options);
+        this.execution.bind(options);
         this.assertExecutionAvailable('page');
         this._executed = this.createExecutor().executePage<T>(cursor);
         return this._executed;
@@ -829,12 +978,14 @@ export class QueryBuilder {
 
     private pages<T>(options: PageOptions = {}): AsyncIterable<QueryPage<T>> {
         const cursor = this.applyPageOptions(options);
+        this.execution.bind(options);
         this.assertExecutionAvailable('iterator');
         return this.createExecutor().pages<T>(cursor);
     }
 
     private items<T>(options: PageOptions = {}): AsyncIterable<T> {
         const cursor = this.applyPageOptions(options);
+        this.execution.bind(options);
         this.assertExecutionAvailable('iterator');
         return this.createExecutor().items<T>(cursor);
     }
@@ -861,7 +1012,7 @@ export class QueryBuilder {
         this._executionMode = mode;
     }
 
-    private createExecutor(): QueryExecutor {
+    private createExecutor(batchObserver?: BatchObserver): QueryExecutor {
         this.request.applyExpressions(this.expressions);
         const operation = this.request.getOperation();
         if (operation === null) {
@@ -875,7 +1026,9 @@ export class QueryBuilder {
             this._logger,
             this._rid,
             this.documentParser,
-            this._projection
+            this._projection,
+            this.execution.signal,
+            batchObserver
         );
     }
 
@@ -883,32 +1036,53 @@ export class QueryBuilder {
     public static defineTable = defineTypedTable;
 
     /** Creates an on-demand table from a full definition or a simple string-key shorthand. */
-    public static createTable(definition: DynamoDBTableDefinition, db: DynamoDBClient): Promise<TableDescription | null>;
-    public static createTable(name: string, key: string, db: DynamoDBClient): Promise<TableDescription | null>;
-    public static createTable(definitionOrName: DynamoDBTableDefinition | string, keyOrClient: string | DynamoDBClient, db?: DynamoDBClient): Promise<TableDescription | null> {
+    public static createTable(definition: DynamoDBTableDefinition, db: DynamoDBClient, options?: TableCreateOptions): Promise<TableDescription | null>;
+    public static createTable(name: string, key: string, db: DynamoDBClient, options?: TableCreateOptions): Promise<TableDescription | null>;
+    public static createTable(definitionOrName: DynamoDBTableDefinition | string, keyOrClient: string | DynamoDBClient, db?: DynamoDBClient | TableCreateOptions, options?: TableCreateOptions): Promise<TableDescription | null> {
         return typeof definitionOrName === 'string'
-            ? QueryTableAdmin.createTable(definitionOrName, keyOrClient as string, db!)
-            : QueryTableAdmin.createTable(definitionOrName, keyOrClient as DynamoDBClient);
+            ? QueryTableAdmin.createTable(definitionOrName, keyOrClient as string, db as DynamoDBClient, options)
+            : QueryTableAdmin.createTable(definitionOrName, keyOrClient as DynamoDBClient, db as TableCreateOptions);
     }
 
     /** Deletes a table and returns the raw AWS table description when supplied. */
-    public static deleteTable(name: string, db: DynamoDBClient): Promise<TableDescription | null | undefined> {
-        return QueryTableAdmin.deleteTable(name, db);
+    public static deleteTable(name: string, db: DynamoDBClient, options?: ExecutionOptions): Promise<TableDescription | null | undefined> {
+        return QueryTableAdmin.deleteTable(name, db, options);
     }
 
     /** Lists table names returned by DynamoDB. */
-    public static listTables(db: DynamoDBClient): Promise<string[] | null> {
-        return QueryTableAdmin.listTables(db);
+    public static listTables(db: DynamoDBClient, options?: ExecutionOptions): Promise<string[] | null> {
+        return QueryTableAdmin.listTables(db, options);
     }
 
+    public static listTablePage(db: DynamoDBClient, options?: TablePageOptions): Promise<TablePage> {
+        return QueryTableAdmin.listTablePage(db, options);
+    }
+
+    public static waitForTable(name: string, db: DynamoDBClient, options?: TableWaitOptions): Promise<void> {
+        return QueryTableAdmin.waitForTable(name, db, options);
+    }
+
+    public static waitForTableDeleted(name: string, db: DynamoDBClient, options?: TableWaitOptions): Promise<void> {
+        return QueryTableAdmin.waitForTable(name, db, options, true);
+    }
+
+    public static updateTable = QueryTableAdmin.updateTable.bind(QueryTableAdmin);
+    public static configureTimeToLive = QueryTableAdmin.configureTimeToLive.bind(QueryTableAdmin);
+    public static describeTimeToLive = QueryTableAdmin.describeTimeToLive.bind(QueryTableAdmin);
+
     /** Returns the raw AWS DescribeTable response, including operational metadata such as status and ARN. */
-    public static describeTable(name: string, db: DynamoDBClient): Promise<TableDescription | null> {
-        return QueryTableAdmin.describeTable(name, db);
+    public static describeTable(name: string, db: DynamoDBClient, options?: ExecutionOptions): Promise<TableDescription | null> {
+        return QueryTableAdmin.describeTable(name, db, options);
     }
 
     /** Returns a validated, portable key/index definition derived from the raw AWS table description. */
-    public static getTableDefinition(name: string, db: DynamoDBClient): Promise<DynamoDBTableDefinition | null> {
-        return QueryTableAdmin.getTableDefinition(name, db);
+    public static getTableDefinition(name: string, db: DynamoDBClient, options?: ExecutionOptions): Promise<DynamoDBTableDefinition | null> {
+        return QueryTableAdmin.getTableDefinition(name, db, options);
+    }
+
+    /** Starts an atomic read transaction. */
+    public static transactGet(db: DynamoDBClient): TransactionReadBuilder {
+        return new TransactionReadBuilder(db);
     }
 
     /** Starts an atomic low-level transaction builder. */
@@ -970,7 +1144,8 @@ export class QueryBuilder {
     }
 
     /** Executes the configured operation once and caches its promise for repeated calls. */
-    toPromise<T>(): Promise<T> {
+    toPromise<T>(options: ExecutionOptions = {}): Promise<T> {
+        this.execution.bind(options);
         if (this._executed !== null) {
             if (this._executionMode !== 'all') {
                 throw new Error('QueryBuilder operations can only be executed once');
@@ -983,7 +1158,8 @@ export class QueryBuilder {
     }
 
     /** Executes the configured operation and returns its value with DynamoDB metadata. */
-    toResponse<T>(): Promise<DynamoResponse<T>> {
+    toResponse<T>(options: ExecutionOptions = {}): Promise<DynamoResponse<T>> {
+        this.execution.bind(options);
         if (this._response !== null) {
             return this._response as Promise<DynamoResponse<T>>;
         }
@@ -1000,12 +1176,14 @@ export class QueryBuilder {
                 this._logger,
                 this._rid,
                 this.documentParser,
-                this._projection
+                this._projection,
+            this.execution.signal
             ).executeResponse<T>() as Promise<DynamoResponse<any>>;
         return this._response as Promise<DynamoResponse<T>>;
     }
 
-    private toResult<T, TPrevious = T>(): Promise<ConditionalWriteResult<T, TPrevious>> {
+    private toResult<T, TPrevious = T>(options: ExecutionOptions = {}): Promise<ConditionalWriteResult<T, TPrevious>> {
+        this.execution.bind(options);
         if (this._result === null) {
             this._result = this.toPromise<T>().then(
                 (value): ConditionalWriteResult<T, TPrevious> => ({applied: true, value}),
@@ -1021,8 +1199,8 @@ export class QueryBuilder {
         return this._result as Promise<ConditionalWriteResult<T, TPrevious>>;
     }
 
-    private toPromiseOrNull<T>(): Promise<T | null> {
-        return this.toPromise<T>().catch((error) => {
+    private toPromiseOrNull<T>(options: ExecutionOptions = {}): Promise<T | null> {
+        return this.toPromise<T>(options).catch((error) => {
             if (error instanceof ConditionalCheckFailedException) {
                 return null;
             }
@@ -1044,5 +1222,11 @@ export const describeTable = QueryBuilder.describeTable;
 export const getTableDefinition = QueryBuilder.getTableDefinition;
 /** Lists DynamoDB table names. */
 export const listTables = QueryBuilder.listTables;
+export const listTablePage = QueryBuilder.listTablePage;
+export const waitForTable = QueryBuilder.waitForTable;
+export const waitForTableDeleted = QueryBuilder.waitForTableDeleted;
+export const updateTable = QueryBuilder.updateTable;
+export const configureTimeToLive = QueryBuilder.configureTimeToLive;
+export const describeTimeToLive = QueryBuilder.describeTimeToLive;
 /** Starts an atomic low-level transaction builder. */
 export const transactWrite = QueryBuilder.transactWrite;

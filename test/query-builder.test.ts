@@ -9,6 +9,116 @@ import {path, ref} from '../src/document-path';
 import {ExpressionBuilder} from '../src/expression-builder';
 import {collectPredicates} from '../src/predicate';
 import type {ExpressionTarget} from '../src/expression-builder';
+import {literal, listAppend, plus} from '../src/update-expression';
+
+test('isolates structured operands and preserves explicit timestamp assignments', async () => {
+    const fake = createFakeDynamoDB();
+    const source = [{value: 1}];
+    const operand = literal(source);
+    source[0].value = 2;
+    (operand.operands[0] as {value: number}[])[0].value = 3;
+    await new QueryBuilder('test', fake.db).timestamps().update({id: 'one'})
+        .assign('items', operand).assign('modifiedAt', literal(7)).set('other').eq(true).toPromise();
+    const input = fake.inputs[0];
+    const values = Object.values(input.ExpressionAttributeValues).map(value => QuerySerializer.parseField(value as any));
+    assert.ok(values.some(value => JSON.stringify(value) === '[{"value":1}]'));
+    assert.ok(values.includes(7));
+    assert.match(input.UpdateExpression, /#modifiedAt = :condition/);
+    assert.throws(() => new QueryBuilder('test', fake.db).update({id: 'one'}).assign('value', plus(literal('wrong') as any, 1)), /numeric/);
+    assert.throws(() => new QueryBuilder('test', fake.db).update({id: 'one'}).assign('value', plus(literal(plus(1, 2)) as any, 1)), /numeric/);
+    assert.throws(() => new QueryBuilder('test', fake.db).update({id: 'one'}).assign('items', listAppend(literal(2) as any, [])), /list operands/);
+});
+
+test('round trips ordered four-part GSI keys and rejects multi-part table and local keys', async () => {
+    const query = new QueryBuilder('test', createFakeDynamoDB().db).query({tenant: 'one'}, {name: 'bound', kind: 'global', partition: 'tenant'});
+    assert.throws(() => query.usingIndex('other'), /cannot change its index/);
+    assert.throws(() => defineTable({name: 'bad', key: {partition: 'id'}, schema: z.object({id: z.string(), invalid: z.boolean()}),
+        indexes: {bad: {kind: 'global', partition: 'invalid'}}} as any), /scalar/);
+    const definition = {name: 'multi', key: {partition: 'id', sort: 'sort'},
+        attributes: {id: 'S', sort: 'N', p1: 'S', p2: 'N', p3: 'B', p4: 'S', s1: 'N', s2: 'B', s3: 'S', s4: 'N'},
+        indexes: {multi: {kind: 'global', partition: ['p1', 'p2', 'p3', 'p4'], sort: ['s1', 's2', 's3', 's4']}}
+    } as const;
+    const create = createFakeDynamoDB();
+    await createTable(definition, create.db);
+    const input = create.inputs[0];
+    assert.deepEqual(input.GlobalSecondaryIndexes[0].KeySchema, [
+        ...definition.indexes.multi.partition.map(AttributeName => ({AttributeName, KeyType: 'HASH'})),
+        ...definition.indexes.multi.sort.map(AttributeName => ({AttributeName, KeyType: 'RANGE'}))
+    ]);
+    const describe = createFakeDynamoDB(() => ({Table: input}));
+    assert.deepEqual(await getTableDefinition('multi', describe.db), definition);
+    for (const partition of [[], ['p1', 'p1'], ['p1', 'p2', 'p3', 'p4', 'id']]) {
+        assert.throws(() => createTable({...definition, indexes: {multi: {...definition.indexes.multi, partition}}} as any, create.db), /Invalid key/);
+    }
+    assert.throws(() => createTable({...definition, key: {partition: ['id'], sort: 'sort'}} as any, create.db), /Invalid key/);
+    assert.throws(() => createTable({...definition, indexes: {local: {kind: 'local', partition: 'id', sort: ['sort']}}} as any, create.db), /Invalid key/);
+    assert.throws(() => createTable({...definition, indexes: {multi: {...definition.indexes.multi,
+        projection: {type: 'INCLUDE', nonKeyAttributes: ['s4']}}}}, create.db), /Invalid projection/);
+    assert.equal(create.inputs.length, 1);
+});
+
+test('validates complete index partitions and ordered sort prefixes before sending', async () => {
+    const fake = createFakeDynamoDB(() => ({Items: []}));
+    const index = {name: 'multi', kind: 'global', partition: ['tenant', 'region'], sort: ['year', 'sequence']} as const;
+    const query = () => new QueryBuilder('test', fake.db).query({tenant: 'one', region: 'GB'}, index);
+    await query().sortKey('year').eq(2026).sortKey('sequence').gte(2).toPromise();
+    assert.equal(fake.inputs[0].IndexName, 'multi');
+    assert.match(fake.inputs[0].KeyConditionExpression, /#tenant = :tenant AND #region = :region AND #year = :condition0 AND #sequence >= :condition1/);
+    assert.throws(() => new QueryBuilder('test', fake.db).query({tenant: 'one'}, index), /every partition/);
+    assert.throws(() => query().sortKey('sequence').eq(2), /contiguous prefix/);
+    assert.throws(() => query().sortKey('year').gt(2020).sortKey('sequence').eq(2), /contiguous prefix/);
+    assert.throws(() => query().consistent(), /consistent reads/);
+    assert.throws(() => new QueryBuilder('test', fake.db).query({one: 1, two: 2, three: 3}), /one partition/);
+    assert.equal(fake.inputs.length, 1);
+});
+
+test('paginates admin results and forwards abort options to bounded waiters', async () => {
+    const fake = createFakeDynamoDB(() => ({TableNames: ['next'], LastEvaluatedTableName: 'next', Table: {TableStatus: 'ACTIVE'}}));
+    const controller = new AbortController();
+    assert.deepEqual(await QueryBuilder.listTablePage(fake.db, {cursor: 'before', limit: 1, signal: controller.signal}), {names: ['next'], cursor: 'next'});
+    assert.deepEqual(fake.inputs[0], {ExclusiveStartTableName: 'before', Limit: 1});
+    assert.equal(fake.options[0].abortSignal, controller.signal);
+    await QueryBuilder.waitForTable('test', fake.db, {maxWaitTime: 2, minDelay: 0.01, maxDelay: 0.01});
+    await assert.rejects(QueryBuilder.listTablePage(fake.db, {limit: 101}), /between 1 and 100/);
+    const reason = new Error('stop admin');
+    controller.abort(reason);
+    await assert.rejects(QueryBuilder.waitForTable('test', fake.db, {signal: controller.signal}), error => error === reason);
+    await assert.rejects(QueryBuilder.listTablePage(fake.db, {signal: controller.signal}), error => error === reason);
+    assert.throws(() => QueryBuilder.deleteTable('test', fake.db, {signal: controller.signal}), error => error === reason);
+    assert.equal(fake.inputs.length, 2);
+});
+
+test('cancels in-flight waiter requests and enforces the full waiter deadline', async () => {
+    const controller = new AbortController();
+    const reason = new Error('cancel polling request');
+    const fake = createFakeDynamoDB((_command, _attempt, options) => new Promise((_resolve, reject) => {
+        options!.abortSignal!.addEventListener('abort', () => reject(options!.abortSignal!.reason), {once: true});
+        controller.abort(reason);
+    }));
+    await assert.rejects(QueryBuilder.waitForTable('pending', fake.db, {signal: controller.signal}), error => error === reason);
+    const stalled = createFakeDynamoDB((_command, _attempt, options) => new Promise((_resolve, reject) => {
+        options!.abortSignal!.addEventListener('abort', () => reject(options!.abortSignal!.reason), {once: true});
+    }));
+    await assert.rejects(QueryBuilder.waitForTable('pending', stalled.db, {maxWaitTime: 0.02, minDelay: 0.001, maxDelay: 0.001}), {name: 'TimeoutError'});
+    assert.equal(stalled.inputs.length, 1);
+});
+
+test('validates billing, global index changes and TTL request shapes', async () => {
+    const fake = createFakeDynamoDB(command => ({Table: {TableName: 'test', KeySchema: [{AttributeName: 'id', KeyType: 'HASH'}],
+        AttributeDefinitions: [{AttributeName: 'id', AttributeType: 'S'}], BillingModeSummary: {BillingMode: 'PAY_PER_REQUEST'}},
+        TimeToLiveSpecification: command.input.TimeToLiveSpecification}));
+    await QueryBuilder.createTable('test', 'id', fake.db, {billingMode: 'PROVISIONED', throughput: {read: 2, write: 3}});
+    assert.deepEqual(fake.inputs[0].ProvisionedThroughput, {ReadCapacityUnits: 2, WriteCapacityUnits: 3});
+    assert.throws(() => QueryBuilder.createTable('test', 'id', fake.db, {throughput: {read: 1, write: 1}}), /On-demand/);
+    await QueryBuilder.updateTable('test', fake.db, {createIndex: {name: 'category', definition: {kind: 'global', partition: 'category'}, attributes: {category: 'S'}}});
+    assert.equal(fake.inputs[2].GlobalSecondaryIndexUpdates[0].Create.IndexName, 'category');
+    assert.deepEqual(fake.inputs[2].GlobalSecondaryIndexUpdates[0].Create.KeySchema, [{AttributeName: 'category', KeyType: 'HASH'}]);
+    await assert.rejects(QueryBuilder.updateTable('test', fake.db, {key: {partition: 'changed'}} as any), /immutable/);
+    await assert.rejects(QueryBuilder.updateTable('test', fake.db, {deleteIndex: 'absent'}), /existing global/);
+    assert.deepEqual(await QueryBuilder.configureTimeToLive('test', 'expiresAt', true, fake.db), {AttributeName: 'expiresAt', Enabled: true});
+    await QueryBuilder.describeTimeToLive('test', fake.db);
+    assert.deepEqual(fake.inputs.at(-1), {TableName: 'test'});
+});
 
 test('snapshots in-flight writes and accepts prototype-sensitive documents', async () => {
     let finish!: (value: object) => void;

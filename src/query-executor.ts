@@ -1,3 +1,4 @@
+import {abortableDelay} from './execution-options';
 import {pathSegments} from './document-path';
 import type {AttributePath} from './document-path';
 import {
@@ -20,9 +21,10 @@ import type {DynamoResponse, GenericDocument, QueryCursor, QueryPage} from "./ty
 import {ValueUtils} from './value-utils';
 
 type QueryLogger = null | ((message: any) => void);
-type DocumentParser = null | ((document: unknown, projection?: readonly AttributePath[] | null) => GenericDocument<any>);
+type DocumentParser = null | ((document: unknown, projection?: readonly AttributePath[] | null, partial?: boolean) => GenericDocument<any>);
 type ExecutionResult<T> = T | GenericDocument<any> | GenericDocument<any>[] | null | undefined;
-type BatchRequestItems = NonNullable<BatchGetItemCommandInput['RequestItems']> | NonNullable<BatchWriteItemCommandInput['RequestItems']>;
+export type BatchRequestItems = NonNullable<BatchGetItemCommandInput['RequestItems']> | NonNullable<BatchWriteItemCommandInput['RequestItems']>;
+export type BatchObserver = (submitted: BatchRequestItems, unprocessed?: BatchRequestItems) => void;
 type LastEvaluatedKey = Record<string, AttributeValue>;
 type MetadataOutput = {ConsumedCapacity?: ConsumedCapacity | ConsumedCapacity[], ItemCollectionMetrics?: ItemCollectionMetrics | ItemCollectionMetrics[] | Record<string, ItemCollectionMetrics[]>};
 
@@ -54,7 +56,9 @@ export class QueryExecutor {
         private logger: QueryLogger,
         private requestId: string,
         private documentParser: DocumentParser,
-        private projection: readonly AttributePath[] | null = null
+        private projection: readonly AttributePath[] | null = null,
+        private signal?: AbortSignal,
+        private batchObserver?: BatchObserver
     ) {
         this.operation = ValueUtils.clone(operation);
         this.documents = ValueUtils.clone(documents);
@@ -64,6 +68,10 @@ export class QueryExecutor {
     /** Executes the operation, following query/scan pages and retrying unprocessed batches. */
     execute<T>(): Promise<ExecutionResult<T>> {
         return this.executeResponse<T>().then((response) => response.value);
+    }
+
+    batchResults<T>(): T[] {
+        return ValueUtils.clone(this.output) as T[];
     }
 
     /** Executes the operation and includes capacity and item-collection metadata. */
@@ -82,17 +90,21 @@ export class QueryExecutor {
             throw new Error('Pages are supported only for query and scan operations');
         }
 
+        this.signal?.throwIfAborted();
         this.applyLastEvaluatedKey(cursor === null ? null : QuerySerializer.serialiseMap(cursor));
         this.logRequest();
         const result = this.operation.kind === 'query'
-            ? await this.dynamoDB.send(new QueryCommand(this.operation.input))
-            : await this.dynamoDB.send(new ScanCommand(this.operation.input));
+            ? await this.dynamoDB.send(new QueryCommand(this.operation.input), {abortSignal: this.signal})
+            : await this.dynamoDB.send(new ScanCommand(this.operation.input), {abortSignal: this.signal});
         this.captureMetadata(result);
         const items = result.Items ? result.Items.map((item) => this.parseDocument(item)) as T[] : [];
         this.logResult(items.length, result.ConsumedCapacity);
 
         return {
             items: items,
+            ...(result.Count === undefined ? {} : {count: result.Count}),
+            ...(result.ScannedCount === undefined ? {} : {scannedCount: result.ScannedCount}),
+            ...(result.ConsumedCapacity === undefined ? {} : {consumedCapacity: ValueUtils.clone(result.ConsumedCapacity)}),
             cursor: result.LastEvaluatedKey && Object.keys(result.LastEvaluatedKey).length > 0
                 ? QuerySerializer.parseItem(result.LastEvaluatedKey) as QueryCursor : null
         };
@@ -113,11 +125,15 @@ export class QueryExecutor {
     /** Lazily iterates through records across query or scan pages. */
     async *items<T>(cursor: QueryCursor | null = null): AsyncIterable<T> {
         for await (const page of this.pages<T>(cursor)) {
-            yield* page.items;
+            for (const item of page.items) {
+                this.signal?.throwIfAborted();
+                yield item;
+            }
         }
     }
 
-    private executeOperation<T>(lastEvaluatedKey: LastEvaluatedKey | null = null): Promise<ExecutionResult<T>> {
+    private async executeOperation<T>(lastEvaluatedKey: LastEvaluatedKey | null = null): Promise<ExecutionResult<T>> {
+        this.signal?.throwIfAborted();
         this.applyLastEvaluatedKey(lastEvaluatedKey);
 
         if ((this.operation.kind === 'query' || this.operation.kind === 'scan') && this.operation.input.Select === 'COUNT') {
@@ -128,7 +144,7 @@ export class QueryExecutor {
 
         switch (this.operation.kind) {
             case 'getItem':
-                return this.dynamoDB.send(new GetItemCommand(this.operation.input)).then((result) => {
+                return this.dynamoDB.send(new GetItemCommand(this.operation.input), {abortSignal: this.signal}).then((result) => {
                     this.captureMetadata(result);
                     if (result.Item) {
                         const parsed = this.parseDocument(result.Item);
@@ -140,11 +156,12 @@ export class QueryExecutor {
                 });
 
             case 'batchGetItem':
-                return this.dynamoDB.send(new BatchGetItemCommand(this.operation.input))
+                this.batchObserver?.(this.operation.input.RequestItems!);
+                return this.dynamoDB.send(new BatchGetItemCommand(this.operation.input), {abortSignal: this.signal})
                     .then((result) => this.handleBatchGetResult<T>(result));
 
             case 'deleteItem':
-                return this.dynamoDB.send(new DeleteItemCommand(this.operation.input)).then((result) => {
+                return this.dynamoDB.send(new DeleteItemCommand(this.operation.input), {abortSignal: this.signal}).then((result) => {
                     this.captureMetadata(result);
                     if (result.Attributes) {
                         const parsed = this.parseDocument(result.Attributes);
@@ -156,15 +173,15 @@ export class QueryExecutor {
                 });
 
             case 'query':
-                return this.dynamoDB.send(new QueryCommand(this.operation.input))
+                return this.dynamoDB.send(new QueryCommand(this.operation.input), {abortSignal: this.signal})
                     .then((result) => this.handlePagedResult<T>(result));
 
             case 'scan':
-                return this.dynamoDB.send(new ScanCommand(this.operation.input))
+                return this.dynamoDB.send(new ScanCommand(this.operation.input), {abortSignal: this.signal})
                     .then((result) => this.handlePagedResult<T>(result));
 
             case 'updateItem':
-                return this.dynamoDB.send(new UpdateItemCommand(this.operation.input)).then((result) => {
+                return this.dynamoDB.send(new UpdateItemCommand(this.operation.input), {abortSignal: this.signal}).then((result) => {
                     this.captureMetadata(result);
                     if (result.Attributes) {
                         const parsed = this.parseDocument(result.Attributes);
@@ -177,7 +194,7 @@ export class QueryExecutor {
 
             case 'putItem':
                 const putReturnValues = this.operation.input.ReturnValues;
-                return this.dynamoDB.send(new PutItemCommand(this.operation.input)).then((result) => {
+                return this.dynamoDB.send(new PutItemCommand(this.operation.input), {abortSignal: this.signal}).then((result) => {
                     const returnsOld = (this.operation.input as {ReturnValues?: string}).ReturnValues === 'ALL_OLD';
                     this.captureMetadata(result);
                     this.logResult(1, result.ConsumedCapacity);
@@ -200,24 +217,26 @@ export class QueryExecutor {
                         ...this.operation.input,
                         ConditionExpression: this.operation.input.ConditionExpression
                     }}]
-                })).then((result) => {
+                }), {abortSignal: this.signal}).then((result) => {
                     this.captureMetadata(result);
                     this.logResult(0, result.ConsumedCapacity);
                     return result as T;
                 });
 
             case 'batchWriteItem':
-                return this.dynamoDB.send(new BatchWriteItemCommand(this.operation.input))
+                this.batchObserver?.(this.operation.input.RequestItems!);
+                return this.dynamoDB.send(new BatchWriteItemCommand(this.operation.input), {abortSignal: this.signal})
                     .then((result) => this.handleBatchWriteResult<T>(result));
         }
     }
 
     private handleBatchGetResult<T>(result: BatchGetItemCommandOutput): Promise<ExecutionResult<T>> | GenericDocument<any>[] {
+        if (this.operation.kind === 'batchGetItem') this.batchObserver?.(this.operation.input.RequestItems!, result.UnprocessedKeys ?? {});
         this.captureMetadata(result);
         if (result.Responses) {
             Object.keys(result.Responses).forEach((tableName) => {
                 if (result.Responses) {
-                    this.output.push(...result.Responses[tableName].map((item) => this.parseDocument(item)));
+                    result.Responses[tableName].forEach(item => this.output.push(this.parseDocument(item)));
                 }
             });
             this.logResult(this.output.length, result.ConsumedCapacity);
@@ -231,6 +250,7 @@ export class QueryExecutor {
     }
 
     private handleBatchWriteResult<T>(result: BatchWriteItemCommandOutput): Promise<ExecutionResult<T>> | GenericDocument<any>[] {
+        if (this.operation.kind === 'batchWriteItem') this.batchObserver?.(this.operation.input.RequestItems!, result.UnprocessedItems ?? {});
         this.captureMetadata(result);
         if (result.UnprocessedItems && Object.keys(result.UnprocessedItems).length > 0) {
             return this.retryUnprocessedBatch<T>(result.UnprocessedItems);
@@ -262,13 +282,14 @@ export class QueryExecutor {
         let cursor: LastEvaluatedKey | null = null;
 
         do {
+            this.signal?.throwIfAborted();
             this.applyLastEvaluatedKey(cursor);
             this.logRequest();
             let result: QueryCommandOutput | ScanCommandOutput;
             if (this.operation.kind === 'query') {
-                result = await this.dynamoDB.send(new QueryCommand(this.operation.input));
+                result = await this.dynamoDB.send(new QueryCommand(this.operation.input), {abortSignal: this.signal});
             } else if (this.operation.kind === 'scan') {
-                result = await this.dynamoDB.send(new ScanCommand(this.operation.input));
+                result = await this.dynamoDB.send(new ScanCommand(this.operation.input), {abortSignal: this.signal});
             } else {
                 throw new Error('Count is supported only for query and scan operations');
             }
@@ -300,7 +321,7 @@ export class QueryExecutor {
 
         this.logger && this.logger({id: this.requestId, method: this.operation.kind, event: 'retry_unprocessed_batch', attempt: this.batchRetryCount, delay: delay});
 
-        return new Promise((resolve) => setTimeout(resolve, delay))
+    return abortableDelay(delay, this.signal)
             .then(() => this.executeOperation<T>());
     }
 
@@ -361,6 +382,7 @@ export class QueryExecutor {
             : Object.fromEntries([...new Set(this.projection.map(attribute => pathSegments(attribute)[0] as string))]
                 .filter(attribute => Object.prototype.hasOwnProperty.call(parsed, attribute))
                 .map(attribute => [attribute, parsed[attribute]]));
-        return this.documentParser === null ? projected : this.documentParser(projected, this.projection);
+        return this.documentParser === null ? projected : this.documentParser(projected, this.projection, this.operation.kind === 'updateItem'
+            && (this.operation.input.ReturnValues === 'UPDATED_NEW' || this.operation.input.ReturnValues === 'UPDATED_OLD'));
     }
 }

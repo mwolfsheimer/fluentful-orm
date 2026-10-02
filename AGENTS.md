@@ -21,10 +21,13 @@ The package currently builds to CommonJS JavaScript and declaration files in `di
 | `src/query-request-state.ts` | Owns the discriminated current operation and validates request modifiers such as consistency, projections, limits, return modes, indexes, and parallel scans. |
 | `src/query-operation.ts` | Discriminated union of supported AWS command inputs, including the custom optional-expression condition-check shape. |
 | `src/query-executor.ts` | Sends assembled AWS SDK commands, parses results, follows query/scan pages, applies hard limits, streams pages/items, retries unprocessed batch work, logs requests/results, and builds response metadata. |
+| `src/execution-options.ts` | Binds execution cancellation once and implements abortable retry delays. Keep signals outside cloned request data. |
+| `src/update-expression.ts` | Isolated structured SET operand descriptors and restricted expression compilation for assignments, fallbacks, list append, and binary arithmetic. |
 | `src/query-serializer.ts` | Converts JavaScript values/documents to and from DynamoDB AttributeValue maps. Handles numbers, strings, booleans, nulls, maps, lists, sets, and `Uint8Array` binary values. |
 | `src/value-utils.ts` | Platform-neutral deep clone/equality/diff implementation. Preserves supported built-ins, cycles, shared references, enumerable metadata, typed arrays, ArrayBuffers, maps, sets, and errors. Used to isolate caller, backend, and response values. |
 | `src/batch-runner.ts` | Splits arrays into chunks and runs chunk workers with bounded concurrency while preserving result order and stopping new work after failure. |
 | `src/transaction-write-builder.ts` | Mutable low-level `TransactWriteItems` builder. Collects up to 100 transaction items, applies request options/idempotency/logging, and caches execution. |
+| `src/transaction-read-builder.ts` | Ordered atomic `TransactGetItems` builder with projections, nullable tuple positions, cancellation, and cached execution. |
 | `src/query-table-admin.ts` | Low-level create, delete, list, describe, and definition-discovery helpers. Validates portable table/key/index/projection definitions and converts them to/from AWS command inputs. |
 | `src/in-memory-dynamodb.ts` | In-memory implementation of the AWS command subset used by this library. Supports tables, CRUD, query/scan/filter/projection, batches, transactions, validation failures, cloning, reset/close, file persistence, and IndexedDB persistence. `createEngine` is the public factory; the backend class and persistence classes are internal. |
 | `src/quewe.ts` | Small serial async work queue with pause/resume. It is a standalone utility used by tests and queue-oriented workflows. |
@@ -43,7 +46,7 @@ The package currently builds to CommonJS JavaScript and declaration files in `di
 | `test/value-utils.test.ts` | Deep clone/equality/diff semantics for cycles, references, built-ins, typed arrays, maps, sets, and enumerable metadata. |
 | `test/query-builder.contract.ts` | Shared application-visible behavior contract. Add behavior changes here when both the memory backend and real DynamoDB should obey the same semantics. |
 | `test/query-builder.memory.test.ts` | Runs the shared contract against `createEngine.memory()` and closes the backend. |
-| `test/query-builder.integration.test.ts` | Runs the shared contract against a real DynamoDB client. Requires AWS credentials and permission to create/delete temporary tables. |
+| `test/query-builder.integration.test.ts` | AWS-only credential preflight, bounded shared contract and opt-in conflict/throttling/TTL probes, resource tracking, independent cleanup, and orphan reporting. Included in offline typecheck but executed only explicitly. |
 | `test/in-memory-dynamodb-lifecycle.test.ts` | Memory-backend-specific isolation, reset/close behavior, unsupported operations, index projections, metadata, point projections, and parallel scans. |
 | `test/persistence.test.ts` | File persistence and IndexedDB persistence across engine instances, binary values, durable mutation/reset behavior, and rollback. Uses `fake-indexeddb` for Node. |
 | `test/memory.test.ts` | Node test-runner aggregator for lifecycle, persistence, and memory contract tests. |
@@ -133,7 +136,9 @@ Use the narrowest relevant check first. After changing request construction, run
 - `createEngine.file(path)` dynamically loads `node:fs/promises` only in Node and must remain unavailable in browsers.
 - Do not add static imports of Node-only modules to shared runtime files. Keep optional Node functionality behind guarded, bundler-safe loading.
 - Use `Uint8Array` in public types and examples for binary values. Do not expose `Buffer` in declarations or require the Node global for normal operations; `test/consumer/run.cjs` checks this.
-- Browser compatibility is currently checked by bundling and a browser smoke fixture, not by an automated real-browser runner. Do not claim browser execution coverage from `npm run test:consumer` alone.
+- `npm run test:consumer` checks packaging and bundling only. `npm run test:browser` additionally executes the IndexedDB/typed API fixture in Chromium at desktop and mobile viewport sizes. Do not claim browser execution from the consumer command alone.
+- Recoverable batches preserve completed, explicitly unprocessed, never-submitted, and uncertain work separately. Only known-unprocessed and never-submitted inputs belong in safe resume payloads; do not retry uncertain writes automatically.
+- Memory supports deterministic GSI lifecycle and ordered base-query cursor continuation after deletion, but not throughput, TTL expiry, byte limits, eventual consistency, or distributed conflict simulation. AWS probes with no observed target event are inconclusive, not parity evidence.
 
 ## API Design Rules
 

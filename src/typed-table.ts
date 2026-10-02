@@ -3,10 +3,15 @@ import {z} from 'zod';
 import {QueryBuilder} from './query-builder';
 import {ValueUtils} from './value-utils';
 import {assertDynamoKeyValue} from './dynamodb-values';
+import {keyComponents} from './query-table-admin';
 import {isAttributeReference, path, ref, pathSegments, uniquePaths} from './document-path';
 import type {AttributePath, AttributeReference, DocumentPath, PathSegment} from './document-path';
 import type {ExpressionAttributeType, PredicateScope, SizeComparison} from './predicate';
-import type {BatchGetOptions, BatchWriteOptions, ConditionalWriteResult, ConditionFailureReturnOptions, DynamoResponse, IndexKind, PageOptions, QueryPage, ReturnConsumedCapacity} from './types';
+import type {GetDocumentSelector, ExecutionOptions, BatchGetOptions, BatchWriteOptions, ConditionalWriteResult, ConditionFailureReturnOptions, DynamoResponse, IndexKind, PageOptions, QueryPage, ReturnConsumedCapacity} from './types';
+import type {SetOperand} from './update-expression';
+import {isUpdateExpression, literal, ifNotExists, listAppend, plus, minus} from './update-expression';
+import type {BatchOutcome} from './types';
+import {TransactionReadBuilder} from './transaction-read-builder';
 import {TransactionWriteBuilder} from './transaction-write-builder';
 import type {TransactionItemOptions} from './transaction-write-builder';
 
@@ -22,6 +27,7 @@ function hasTransform(value: unknown, seen = new Set<unknown>()): boolean {
 }
 type RecordKey<TRecord> = Extract<keyof TRecord, string>;
 type DynamoKeyValue = string | number | Uint8Array;
+type NumericField<TRecord> = {[TField in RecordKey<TRecord>]: NonNullable<TRecord[TField]> extends number ? TField : never}[RecordKey<TRecord>];
 type DynamoKeyField<TRecord> = {[TKey in RecordKey<TRecord>]: TRecord[TKey] extends DynamoKeyValue ? TKey : never}[RecordKey<TRecord>];
 
 export type PathValue<TRecord, TSegments extends readonly PathSegment[]> = TRecord extends unknown
@@ -34,7 +40,7 @@ export type PathValue<TRecord, TSegments extends readonly PathSegment[]> = TReco
 type TypedAttribute<TRecord> = RecordKey<TRecord> | DocumentPath<unknown, readonly [RecordKey<TRecord>, ...PathSegment[]]>;
 type AttributeValue<TRecord, TAttribute> = TAttribute extends keyof TRecord ? TRecord[TAttribute]
     : TAttribute extends DocumentPath<unknown, infer TSegments> ? PathValue<TRecord, TSegments> : never;
-type PartialProjection<TValue> = TValue extends Uint8Array | ReadonlySet<unknown> | Date ? TValue
+export type PartialProjection<TValue> = TValue extends Uint8Array | ReadonlySet<unknown> | Date ? TValue
     : TValue extends readonly (infer TItem)[] ? PartialProjection<TItem>[]
         : TValue extends object ? {[TField in keyof TValue]?: PartialProjection<TValue[TField]>} : TValue;
 type ProjectedPath<TRecord, TSegments extends readonly PathSegment[]> = TRecord extends unknown
@@ -68,12 +74,16 @@ export type IndexProjection<TRecord> =
     | {readonly type: 'INCLUDE'; readonly nonKeyAttributes: readonly RecordKey<TRecord>[]};
 
 /** Declares a typed global or local secondary index and its projection. */
-export type IndexDefinition<TRecord> = KeyDefinition<TRecord> & {
-    readonly kind: IndexKind;
-    readonly projection?: IndexProjection<TRecord>;
-};
+export type KeyComponents<TField extends string = string> = TField
+    | readonly [TField] | readonly [TField, TField] | readonly [TField, TField, TField] | readonly [TField, TField, TField, TField];
+type IndexKeyDefinition<TRecord> = {readonly partition: KeyComponents<DynamoKeyField<TRecord>>; readonly sort?: KeyComponents<DynamoKeyField<TRecord>>};
+export type IndexDefinition<TRecord> = (
+    | ({readonly kind: 'global'} & IndexKeyDefinition<TRecord>)
+    | ({readonly kind: 'local'} & KeyDefinition<TRecord>)
+) & {readonly projection?: IndexProjection<TRecord>};
 type IndexDefinitions<TRecord> = Record<string, IndexDefinition<TRecord>>;
-type KeyField<TRecord, TKey extends KeyDefinition<TRecord>> = TKey['partition'] | (TKey extends {readonly sort: infer TSort extends RecordKey<TRecord>} ? TSort : never);
+type ComponentField<TValue> = TValue extends readonly (infer TField)[] ? TField : TValue;
+type KeyField<TRecord, TKey extends IndexKeyDefinition<TRecord>> = Extract<ComponentField<TKey['partition']> | ComponentField<TKey['sort']>, RecordKey<TRecord>>;
 type IndexProjectionField<TRecord, TTableKey extends KeyDefinition<TRecord>, TIndex extends IndexDefinition<TRecord>> =
     TIndex extends {readonly projection: {readonly type: 'KEYS_ONLY'}}
         ? KeyField<TRecord, TTableKey> | KeyField<TRecord, TIndex>
@@ -85,7 +95,7 @@ type IndexProjectedRecord<TRecord, TTableKey extends KeyDefinition<TRecord>, TIn
 type IndexAvailableRecord<TRecord, TTableKey extends KeyDefinition<TRecord>, TIndex extends IndexDefinition<TRecord>> =
     TIndex['kind'] extends 'local' ? TRecord : IndexProjectedRecord<TRecord, TTableKey, TIndex>;
 type KeyDocument<TRecord, TKey extends KeyDefinition<TRecord>> = Pick<TRecord, KeyField<TRecord, TKey>>;
-type PartitionKeyDocument<TRecord, TKey extends KeyDefinition<TRecord>> = Pick<TRecord, TKey['partition']>;
+type PartitionKeyDocument<TRecord, TKey extends IndexKeyDefinition<TRecord>> = Pick<TRecord, Extract<ComponentField<TKey['partition']>, RecordKey<TRecord>>>;
 type ComparisonValue<T> = T extends string ? string : T extends ReadonlySet<infer TValue>
     ? TValue
     : T extends readonly (infer TValue)[]
@@ -94,9 +104,9 @@ type ComparisonValue<T> = T extends string ? string : T extends ReadonlySet<infe
 
 export interface TypedFinal<TResult> {
     /** Executes the typed operation and validates its result against the table schema. */
-    toPromise(): Promise<TResult>;
+    toPromise(options?: ExecutionOptions): Promise<TResult>;
     /** Executes the typed operation and returns DynamoDB response metadata. */
-    toResponse(): Promise<DynamoResponse<TResult>>;
+    toResponse(options?: ExecutionOptions): Promise<DynamoResponse<TResult>>;
     
 }
 
@@ -113,7 +123,7 @@ export interface TypedGetChain<TRecord, TResult = TRecord | null> extends TypedF
 /** Adds typed conditional-write result handling to a write chain. */
 export interface TypedWriteFinal<TRecord, TResult> extends TypedFinal<TResult> {
     /** Returns whether the condition was applied and validates any previous record. */
-    toResult(): Promise<ConditionalWriteResult<TResult, TRecord>>;
+    toResult(options?: ExecutionOptions): Promise<ConditionalWriteResult<TResult, TRecord>>;
 }
 
 /** Fluent chain for creating a typed record. */
@@ -219,7 +229,21 @@ export interface TypedCompositeQueryChain<TRecord, TSortValue> extends TypedQuer
     sortKey(): TypedSortKeyComparison<TSortValue, TRecord>;
 }
 
-type TypedKeyQueryChain<TRecord, TKey extends KeyDefinition<TRecord>> = TKey extends {readonly sort: infer TSort extends RecordKey<TRecord>}
+export interface TypedMultiQueryChain<TRecord, TSorts extends readonly string[], TResult = TRecord, TSelectable = TResult>
+    extends TypedQueryChain<TRecord, TResult, TSelectable> {
+    sortKey(attribute: TSorts[0]): Omit<TypedSortKeyComparison<TRecord[Extract<TSorts[0], keyof TRecord>], TRecord, TResult, TSelectable>, 'eq'> & {
+        eq(value: TRecord[Extract<TSorts[0], keyof TRecord>]): TSorts extends readonly [string, ...infer TRest extends string[]]
+            ? TRest extends [] ? TypedQueryChain<TRecord, TResult, TSelectable> : TypedMultiQueryChain<TRecord, TRest, TResult, TSelectable>
+            : TypedQueryChain<TRecord, TResult, TSelectable>;
+    };
+    consistent(): TypedMultiQueryChain<TRecord, TSorts, TResult, TSelectable>;
+    limit(chunkSize: number, hardLimit?: number | null): TypedMultiQueryChain<TRecord, TSorts, TResult, TSelectable>;
+    ascending(): TypedMultiQueryChain<TRecord, TSorts, TResult, TSelectable>;
+    descending(): TypedMultiQueryChain<TRecord, TSorts, TResult, TSelectable>;
+    returnCapacity(mode?: ReturnConsumedCapacity): TypedMultiQueryChain<TRecord, TSorts, TResult, TSelectable>;
+}
+
+type TypedKeyQueryChain<TRecord, TKey extends IndexKeyDefinition<TRecord>> = TKey extends {readonly sort: infer TSort extends RecordKey<TRecord>}
     ? TypedCompositeQueryChain<TRecord, TRecord[TSort]>
     : TypedQueryChain<TRecord>;
 
@@ -235,7 +259,9 @@ type TypedProjectedIndexQueryChain<
     TIndex extends IndexDefinition<TRecord>,
     TProjected = IndexProjectedRecord<TRecord, TTableKey, TIndex>,
     TAvailable = IndexAvailableRecord<TRecord, TTableKey, TIndex>
-> = TIndex extends {readonly sort: infer TSort extends RecordKey<TRecord>}
+ > = TIndex extends {readonly sort: infer TSorts extends readonly string[]}
+     ? TypedMultiQueryChain<TProjected, TSorts, TProjected, TAvailable>
+     : TIndex extends {readonly sort: infer TSort extends RecordKey<TRecord>}
     ? TypedQueryChain<TProjected, TProjected, TAvailable> & {
         sortKey(): TypedSortKeyComparison<TRecord[TSort], TProjected, TProjected, TAvailable>;
     }
@@ -285,6 +311,10 @@ export interface TypedDeleteChain<TRecord, TResult = TRecord | null> extends Typ
     returnItemCollectionMetrics(): TypedDeleteChain<TRecord, TResult>;
 }
 
+export interface TypedUpdateReferences<TRecord> {
+    ref<TAttribute extends TypedAttribute<TRecord>>(attribute: TAttribute): AttributeReference<AttributeValue<TRecord, TAttribute>>;
+}
+
 /** Fluent chain for updating a typed record. */
 export interface TypedUpdateChain<TRecord, TResult = TRecord | null> extends TypedWriteFinal<TRecord, TResult>, TypedPredicateGroups<TRecord, TypedUpdateChain<TRecord, TResult>> {
     /** Chooses whether a failed condition returns the previous record. */
@@ -293,6 +323,8 @@ export interface TypedUpdateChain<TRecord, TResult = TRecord | null> extends Typ
     where<TAttribute extends TypedAttribute<TRecord>>(key: TAttribute): TypedConditionalComparison<AttributeValue<TRecord, TAttribute>, TypedUpdateChain<TRecord, TResult>>;
     /** Returns the updated record in the successful result. */
     returningAllNew(): TypedUpdateChain<TRecord, TRecord | null>;
+    returningUpdatedNew(): TypedUpdateChain<TRecord, PartialProjection<TRecord> | null>;
+    returningUpdatedOld(): TypedUpdateChain<TRecord, PartialProjection<TRecord> | null>;
     /** Returns the previous item in the successful result. */
     returningAllOld(): TypedUpdateChain<TRecord, TRecord | null>;
     /** Omits the updated record from the successful result. */
@@ -302,6 +334,8 @@ export interface TypedUpdateChain<TRecord, TResult = TRecord | null> extends Typ
     /** Requests local-secondary-index item-collection metrics in toResponse(). */
     returnItemCollectionMetrics(): TypedUpdateChain<TRecord, TResult>;
     /** Begins a type-checked SET update. */
+    assign<TAttribute extends TypedAttribute<TRecord>>(attribute: TAttribute,
+        expression: (fields: TypedUpdateReferences<TRecord>) => SetOperand<AttributeValue<TRecord, TAttribute>>): TypedUpdateChain<TRecord, TResult>;
     set<TAttribute extends TypedAttribute<TRecord>>(attribute: TAttribute): {eq(value: AttributeValue<TRecord, TAttribute>): TypedUpdateChain<TRecord, TResult>};
     /** Removes an attribute from the record. */
     remove(attribute: TypedAttribute<TRecord>): TypedUpdateChain<TRecord, TResult>;
@@ -310,7 +344,7 @@ export interface TypedUpdateChain<TRecord, TResult = TRecord | null> extends Typ
     /** Begins a type-checked set-membership DELETE update. */
     delete<TKey extends RecordKey<TRecord>>(attribute: TKey): {eq(value: TRecord[TKey]): TypedUpdateChain<TRecord, TResult>};
     /** Executes the update and converts a conditional failure into `null`. */
-    toPromiseOrNull(): Promise<TResult | null>;
+    toPromiseOrNull(options?: ExecutionOptions): Promise<TResult | null>;
 }
 
 /** Starts the type-checked modifiers for a typed update. */
@@ -318,6 +352,8 @@ export interface TypedUpdateStart<TRecord, TInput extends AnyRecord> {
     /** Sets several fields from a partial input document. */
     with(document: Partial<TInput>): TypedUpdateChain<TRecord>;
     /** Begins a type-checked SET update. */
+    assign<TAttribute extends TypedAttribute<TRecord>>(attribute: TAttribute,
+        expression: (fields: TypedUpdateReferences<TRecord>) => SetOperand<AttributeValue<TRecord, TAttribute>>): TypedUpdateChain<TRecord>;
     set<TAttribute extends TypedAttribute<TRecord>>(attribute: TAttribute): {eq(value: AttributeValue<TRecord, TAttribute>): TypedUpdateChain<TRecord>};
     /** Removes an attribute from the record. */
     remove(attribute: TypedAttribute<TRecord>): TypedUpdateChain<TRecord>;
@@ -386,7 +422,7 @@ export class TypedTable<
             if (definition.kind !== 'global' && definition.kind !== 'local') {
                 throw new Error(`Typed table ${this.name} index ${indexName} requires a global or local kind`);
             }
-            this.assertKeyDefinition(definition, `index ${indexName}`);
+            this.assertKeyDefinition(definition, `index ${indexName}`, definition.kind === 'global');
             if (definition.kind === 'local' && (this.key.sort === undefined
                 || definition.partition !== this.key.partition || definition.sort === undefined)) {
                 throw new Error(`Local index ${indexName} requires the table partition key and a sort key on a composite-key table`);
@@ -472,7 +508,7 @@ export class TypedTable<
         for (const definition of [this.key, ...Object.values(this.indexes)]) {
             for (const field of this.keyFields(definition)) {
                 if (Object.prototype.hasOwnProperty.call(document, field) && document[field] !== undefined) {
-                    assertDynamoKeyValue(document[field], field === definition.sort);
+                    assertDynamoKeyValue(document[field], keyComponents(definition.sort).includes(field));
                 }
             }
         }
@@ -483,6 +519,11 @@ export class TypedTable<
         const selections = uniquePaths(fields).map(field => pathSegments(field));
         fields.forEach(field => this.assertField(field));
         return this.parseProjected(this.outputSchema ?? this.schema, document, selections) as Partial<RecordOf<TSchema>>;
+    }
+
+    /** Parses sparse update images without filling omitted fields or validating whole-record invariants. */
+    parsePartialStored(document: unknown): PartialProjection<RecordOf<TSchema>> {
+        return this.parseProjected(this.outputSchema ?? this.schema, document, [[]], true) as PartialProjection<RecordOf<TSchema>>;
     }
 
     private unwrapSchema(schema: z.ZodType): z.ZodType {
@@ -526,6 +567,7 @@ export class TypedTable<
     private parseProjected(schema: z.ZodType, value: unknown, selections: readonly (readonly PathSegment[])[], partialWhole = false): unknown {
         if (selections.some(segments => segments.length === 0)) {
             if (!partialWhole) return schema.parse(value);
+            if (value === null) return schema.parse(value);
             const unwrapped = this.unwrapSchema(schema);
             if (unwrapped instanceof z.ZodObject || unwrapped instanceof z.ZodRecord) {
                 const document = z.object({}).passthrough().parse(value);
@@ -534,6 +576,16 @@ export class TypedTable<
             }
             if (unwrapped instanceof z.ZodArray) return z.array(z.unknown()).parse(value)
                 .map(item => this.parseProjected(unwrapped.element as z.ZodType, item, [[]], true));
+            if (unwrapped instanceof z.ZodTuple) {
+                const members = [...unwrapped.def.items, ...(unwrapped.def.rest ? [unwrapped.def.rest] : [])] as z.ZodType[];
+                return z.array(z.unknown()).parse(value).map(item => {
+                    let error: unknown;
+                    for (const member of members) {
+                        try { return this.parseProjected(member, item, [[]], true); } catch (failure) { error = failure; }
+                    }
+                    throw error ?? new Error('Unexpected tuple fragment');
+                });
+            }
             if (!(unwrapped instanceof z.ZodUnion)) return schema.parse(value);
         }
         schema = this.unwrapSchema(schema);
@@ -606,6 +658,54 @@ export class TypedTable<
         return this.pathSchema(key).parse(value);
     }
 
+    /** Validates structured assignments against stored schema shapes and literal fragments. */
+    parseAssignment(key: AttributePath, operand: SetOperand): SetOperand {
+        this.assertWriteSchema();
+        const compatible = (target: z.ZodType, source: z.ZodType): boolean => {
+            target = this.unwrapSchema(target);
+            source = this.unwrapSchema(source);
+            if (source instanceof z.ZodUnion) return source.options.every(option => compatible(target, option as z.ZodType));
+            if (target instanceof z.ZodUnion) return target.options.some(option => compatible(option as z.ZodType, source));
+            if (source instanceof z.ZodLiteral) return [...source.values].every(value => target.safeParse(value).success);
+            if (source instanceof z.ZodEnum) return source.options.every(value => target.safeParse(value).success);
+            if (target.def.type !== source.def.type) return false;
+            if (target instanceof z.ZodArray && source instanceof z.ZodArray) return compatible(target.element as z.ZodType, source.element as z.ZodType);
+            if (target instanceof z.ZodSet && source instanceof z.ZodSet) return compatible(target.def.valueType as z.ZodType, source.def.valueType as z.ZodType);
+            if (target instanceof z.ZodObject && source instanceof z.ZodObject) return Object.entries(target.shape).every(([field, schema]) =>
+                source.shape[field] ? compatible(schema as z.ZodType, source.shape[field] as z.ZodType) : (schema as z.ZodType).isOptional());
+            return true;
+        };
+        const parse = (value: unknown, schema: z.ZodType): SetOperand => {
+            if (isAttributeReference(value)) {
+                if (!compatible(schema, this.pathSchema(path(...value.segments)))) throw new Error('Stored assignment reference has an incompatible schema');
+                return value;
+            }
+            if (!isUpdateExpression(value)) return literal(schema.parse(value));
+            const operands = value.operands;
+            if (value.kind === 'literal') return literal(schema.parse(operands[0]));
+            if (value.kind === 'if_not_exists') {
+                const reference = parse(operands[0], schema);
+                if (!isAttributeReference(reference)) throw new Error('ifNotExists requires a stored attribute reference');
+                return ifNotExists(reference, parse(operands[1], schema));
+            }
+            const unwrapped = this.unwrapSchema(schema);
+            if (value.kind === 'list_append') {
+                if (!(unwrapped instanceof z.ZodArray)) throw new Error('listAppend requires an array destination');
+                const fragments = z.array(unwrapped.element as z.ZodType);
+                return listAppend(parse(operands[0], fragments) as SetOperand<unknown[]>, parse(operands[1], fragments) as SetOperand<unknown[]>);
+            }
+            if (!(unwrapped instanceof z.ZodNumber)) throw new Error('SET arithmetic requires a numeric destination');
+            const left = parse(operands[0], z.number()) as SetOperand<number>;
+            const right = parse(operands[1], z.number()) as SetOperand<number>;
+            return value.kind === '+' ? plus(left, right) : minus(left, right);
+        };
+        const parsed = parse(operand, this.pathSchema(key));
+        if (pathSegments(key).length === 1 && isUpdateExpression(parsed) && parsed.kind === 'literal') {
+            this.assertKeyValues({[pathSegments(key)[0] as string]: parsed.operands[0]});
+        }
+        return parsed;
+    }
+
     /** Validates numeric deltas and set subsets without whole-field constraints. */
     parseDelta(key: AttributePath, value: unknown, remove = false): unknown {
         this.assertWriteSchema();
@@ -657,6 +757,10 @@ export class TypedTable<
         this.pathSchema(field);
     }
 
+    assertTimeToLiveField(field: string): void {
+        if (!(this.unwrapSchema(this.pathSchema(field)) instanceof z.ZodNumber)) throw new Error('TTL requires a top-level numeric epoch-seconds field');
+    }
+
     /** Validates an exact primary key document. */
     parseKey(document: unknown): KeyDocument<RecordOf<TSchema>, TKey> {
         return this.parseExactKey(document, this.keyFields(this.key), `Typed table ${this.name} key`, this.key.sort) as KeyDocument<RecordOf<TSchema>, TKey>;
@@ -678,15 +782,16 @@ export class TypedTable<
             throw new Error(`Typed table ${this.name} does not define index ${index}`);
         }
 
-        return this.parseExactKey(document, [indexDefinition.partition], `Typed table ${this.name} index ${index} partition key`) as PartitionKeyDocument<RecordOf<TSchema>, TIndexes[TName]>;
+        return this.parseExactKey(document, keyComponents(indexDefinition.partition), `Typed table ${this.name} index ${index} partition key`) as PartitionKeyDocument<RecordOf<TSchema>, TIndexes[TName]>;
     }
 
     /** Validates a value against a declared table or index sort key. */
-    parseSortKey<TKeyDefinition extends KeyDefinition<RecordOf<TSchema>>>(definition: TKeyDefinition, value: unknown): unknown {
-        if (definition.sort === undefined) {
+    parseSortKey<TKeyDefinition extends IndexKeyDefinition<RecordOf<TSchema>>>(definition: TKeyDefinition, value: unknown, field?: string): unknown {
+        const attribute = field ?? keyComponents(definition.sort)[0];
+        if (attribute === undefined || !keyComponents(definition.sort).includes(attribute)) {
             throw new Error(`Typed table ${this.name} key does not define a sort key`);
         }
-        return this.parseField(definition.sort, value);
+        return this.parseField(attribute, value);
     }
 
     private parseFields(document: AnyRecord, fields: readonly string[]): AnyRecord {
@@ -705,15 +810,29 @@ export class TypedTable<
         });
     }
 
-    private assertKeyDefinition(definition: KeyDefinition<RecordOf<TSchema>>, label: string): void {
-        if (!definition || typeof definition.partition !== 'string') {
+    private assertKeyDefinition(definition: IndexKeyDefinition<RecordOf<TSchema>>, label: string, multiple = false): void {
+        if (!definition || (!multiple && (typeof definition.partition !== 'string' || (definition.sort !== undefined && typeof definition.sort !== 'string')))) {
             throw new Error(`Typed table ${this.name} ${label} requires a partition key`);
         }
+        const partitions = keyComponents(definition.partition), sorts = keyComponents(definition.sort);
+        if (!Array.isArray(partitions) || !Array.isArray(sorts) || partitions.length < 1 || partitions.length > (multiple ? 4 : 1)
+            || sorts.length > (multiple ? 4 : 1) || (definition.sort !== undefined && sorts.length === 0)
+            || [...partitions, ...sorts].some(field => typeof field !== 'string' || !field)) throw new Error('Invalid index key components');
         const fields = this.keyFields(definition);
-        if (fields.length === 2 && fields[0] === fields[1]) {
+        if (new Set(fields).size !== fields.length) {
             throw new Error(`Typed table ${this.name} ${label} partition and sort keys must be different`);
         }
         this.assertDefinedFields(fields, label);
+        const scalar = (schema: z.ZodType): boolean => {
+            schema = this.unwrapSchema(schema);
+            if (schema instanceof z.ZodString || schema instanceof z.ZodNumber || schema instanceof z.ZodEnum) return true;
+            if (schema instanceof z.ZodLiteral) return [...schema.values].every(value => typeof value === 'string' || typeof value === 'number');
+            if (schema instanceof z.ZodUnion) return schema.options.every(option => scalar(option as z.ZodType));
+            return schema instanceof z.ZodCustom && schema.clone({...schema.def, checks: []}).safeParse(new Uint8Array([1])).success;
+        };
+        for (const field of fields) {
+            if (!scalar(this.pathSchema(field))) throw new Error(`Typed table ${this.name} key ${field} must use a scalar DynamoDB schema`);
+        }
     }
 
     private assertIndexProjection(definition: IndexDefinition<RecordOf<TSchema>>, indexName: string): void {
@@ -741,8 +860,8 @@ export class TypedTable<
         return Array.from(fields);
     }
 
-    private keyFields(definition: KeyDefinition<RecordOf<TSchema>>): string[] {
-        return definition.sort === undefined ? [definition.partition] : [definition.partition, definition.sort];
+    private keyFields(definition: IndexKeyDefinition<RecordOf<TSchema>>): string[] {
+        return [...keyComponents(definition.partition), ...keyComponents(definition.sort)];
     }
 
     private parseExactKey(document: unknown, expected: readonly string[], label: string, sort?: string): AnyRecord {
@@ -812,6 +931,11 @@ export class TypedTableQuery<
         return this.builder().createBatch<RecordOf<TSchema>>(documents as AnyRecord[], options);
     }
 
+    /** Validates all inputs before sending, then reports aggregate recoverable outcomes. */
+    createBatchResult(documents: InputOf<TSchema>[], options: BatchWriteOptions = {}): Promise<BatchOutcome<InputOf<TSchema>, RecordOf<TSchema>>> {
+        return this.builder().createBatchResult<RecordOf<TSchema>>(documents as AnyRecord[], options) as Promise<BatchOutcome<InputOf<TSchema>, RecordOf<TSchema>>>;
+    }
+
     /** Reads one record by its complete primary key. */
     get(key: KeyDocument<RecordOf<TSchema>, TKey>): TypedGetChain<RecordOf<TSchema>> {
         return this.getChain(this.builder().get(this.table.parseKey(key) as AnyRecord));
@@ -829,6 +953,18 @@ export class TypedTableQuery<
         return this.builder().getBatch(parsedKeys, options);
     }
 
+    /** Reads batches with projection-aware results and aggregate recovery information. */
+    getBatchResult<TAttribute extends TypedAttribute<RecordOf<TSchema>>>(
+        keys: KeyDocument<RecordOf<TSchema>, TKey>[],
+        options: Omit<BatchGetOptions, 'select'> & {select: TAttribute[]}
+    ): Promise<BatchOutcome<KeyDocument<RecordOf<TSchema>, TKey>, ProjectedRecord<RecordOf<TSchema>, TAttribute>>>;
+    getBatchResult(keys: KeyDocument<RecordOf<TSchema>, TKey>[], options?: Omit<BatchGetOptions, 'select'>): Promise<BatchOutcome<KeyDocument<RecordOf<TSchema>, TKey>, RecordOf<TSchema>>>;
+    getBatchResult(keys: KeyDocument<RecordOf<TSchema>, TKey>[], options: BatchGetOptions = {}): Promise<BatchOutcome<KeyDocument<RecordOf<TSchema>, TKey>, unknown>> {
+        const parsedKeys = keys.map(key => this.table.parseKey(key));
+        options.select?.forEach(attribute => this.table.assertField(attribute));
+        return this.builder().getBatchResult(parsedKeys, options) as Promise<BatchOutcome<KeyDocument<RecordOf<TSchema>, TKey>, unknown>>;
+    }
+
     /** Deletes one record by its complete primary key. */
     delete(key: KeyDocument<RecordOf<TSchema>, TKey>): TypedDeleteChain<RecordOf<TSchema>> {
         return this.deleteChain(this.builder().delete(this.table.parseKey(key) as AnyRecord));
@@ -843,6 +979,12 @@ export class TypedTableQuery<
     deleteBatch(keys: KeyDocument<RecordOf<TSchema>, TKey>[], options: BatchWriteOptions | boolean = {}): Promise<void> {
         const parsedKeys = keys.map((key) => this.table.parseKey(key));
         return this.builder().deleteBatch(parsedKeys, options);
+    }
+
+    /** Reports confirmed and uncertain outcomes without retrying uncertain deletes. */
+    deleteBatchResult(keys: KeyDocument<RecordOf<TSchema>, TKey>[], options: BatchWriteOptions = {}): Promise<BatchOutcome<KeyDocument<RecordOf<TSchema>, TKey>, never>> {
+        const parsedKeys = keys.map(key => this.table.parseKey(key));
+        return this.builder().deleteBatchResult(parsedKeys, options) as Promise<BatchOutcome<KeyDocument<RecordOf<TSchema>, TKey>, never>>;
     }
 
     /** Starts a schema-validated update for one record. */
@@ -866,8 +1008,9 @@ export class TypedTableQuery<
             scan: () => this.scanChain(this.builder(index).scan().usingIndex(index, selected.kind), index) as any,
             query: (document) => {
                 const definition = this.table.indexes[index];
-                const query = this.builder(index).query(this.table.parseIndexKey(index, document) as AnyRecord);
-                query.usingIndex(index, definition.kind);
+                const query = this.builder(index).query(this.table.parseIndexKey(index, document) as AnyRecord,
+                    {name: index, kind: definition.kind, partition: definition.partition, sort: definition.sort} as import('./query-table-admin').DynamoDBIndexDefinition & {name: string});
+                if (Array.isArray(definition.sort)) return this.multiKeyQueryChain(query, definition, index, definition.sort) as any;
                 return this.keyQueryChain(query, definition, index) as any;
             }
         };
@@ -878,12 +1021,23 @@ export class TypedTableQuery<
         return this.scanChain(this.builder().scan());
     }
 
+    /** Configures asynchronous service expiry; records are not filtered by the ORM. */
+    configureTimeToLive(attribute: NumericField<RecordOf<TSchema>>, enabled: boolean, options?: ExecutionOptions): Promise<import('@aws-sdk/client-dynamodb').TimeToLiveSpecification | null> {
+        this.table.assertTimeToLiveField(attribute);
+        return QueryBuilder.configureTimeToLive(this.table.name, attribute, enabled, this.dynamoDB, options);
+    }
+
+    describeTimeToLive(options?: ExecutionOptions): Promise<import('@aws-sdk/client-dynamodb').TimeToLiveDescription | null> {
+        return QueryBuilder.describeTimeToLive(this.table.name, this.dynamoDB, options);
+    }
+
     private builder(index: Extract<keyof TIndexes, string> | null = null): QueryBuilder {
         if (this.transactionBuilder !== null) {
             return this.transactionBuilder;
         }
 
-        return new QueryBuilder(this.table.name, this.dynamoDB, (document, projection) => {
+        return new QueryBuilder(this.table.name, this.dynamoDB, (document, projection, partial) => {
+            if (partial) return this.table.parsePartialStored(document);
             if (projection) {
                 return this.table.parseProjection(document, projection);
             }
@@ -894,8 +1048,8 @@ export class TypedTableQuery<
 
     private final<TResult>(query: any): TypedFinal<TResult> {
         return {
-            toPromise: () => query.toPromise() as Promise<TResult>,
-            toResponse: () => query.toResponse() as Promise<DynamoResponse<TResult>>
+            toPromise: (options) => query.toPromise(options) as Promise<TResult>,
+            toResponse: (options) => query.toResponse(options) as Promise<DynamoResponse<TResult>>
         };
     }
 
@@ -914,12 +1068,12 @@ export class TypedTableQuery<
     private writeFinal<TResult>(query: any): TypedWriteFinal<RecordOf<TSchema>, TResult> {
         return {
             ...this.final<TResult>(query),
-            toResponse: () => query.toResponse() as Promise<DynamoResponse<TResult>>,
-            toResult: () => {
+            toResponse: (options) => query.toResponse(options) as Promise<DynamoResponse<TResult>>,
+            toResult: (options) => {
                 if (this.transactionBuilder !== null) {
                     throw new Error('Execute typed transactions through the transaction builder');
                 }
-                const raw: Promise<ConditionalWriteResult<TResult, unknown>> = query.toResult();
+                const raw: Promise<ConditionalWriteResult<TResult, unknown>> = query.toResult(options);
                 let parsed = this.resultPromises.get(raw);
                 if (parsed === undefined) {
                     parsed = raw.then((result) => result.applied === true
@@ -973,7 +1127,7 @@ export class TypedTableQuery<
     private readChain<
         TResult = RecordOf<TSchema>,
         TSelectable = TResult
-    >(query: any, definition: KeyDefinition<RecordOf<TSchema>> | null = null, index: Extract<keyof TIndexes, string> | null = null): TypedReadChain<RecordOf<TSchema>, TResult, TSelectable> {
+    >(query: any, definition: IndexKeyDefinition<RecordOf<TSchema>> | null = null, index: Extract<keyof TIndexes, string> | null = null): TypedReadChain<RecordOf<TSchema>, TResult, TSelectable> {
         return {
             ...this.final<TResult[]>(query),
             consistent: () => this.readChain<TResult, TSelectable>(query.consistent(), definition, index),
@@ -987,14 +1141,14 @@ export class TypedTableQuery<
             page: (options) => query.page(options) as Promise<QueryPage<TResult>>,
             pages: (options) => query.pages(options) as AsyncIterable<QueryPage<TResult>>,
             items: (options) => query.items(options) as AsyncIterable<TResult>,
-            toPromise: () => query.toPromise() as Promise<TResult[]>
+            toPromise: (options) => query.toPromise(options) as Promise<TResult[]>
         };
     }
 
     private queryChain<
         TResult = RecordOf<TSchema>,
         TSelectable = TResult
-    >(query: any, definition: KeyDefinition<RecordOf<TSchema>> = this.table.key, index: Extract<keyof TIndexes, string> | null = null): TypedQueryChain<RecordOf<TSchema>, TResult, TSelectable> {
+    >(query: any, definition: IndexKeyDefinition<RecordOf<TSchema>> = this.table.key, index: Extract<keyof TIndexes, string> | null = null): TypedQueryChain<RecordOf<TSchema>, TResult, TSelectable> {
         return {
             ...this.final<TResult[]>(query),
             limit: (chunkSize, hardLimit = null) => this.queryChain<TResult, TSelectable>(query.limit(chunkSize, hardLimit), definition, index),
@@ -1011,11 +1165,34 @@ export class TypedTableQuery<
             page: (options) => query.page(options) as Promise<QueryPage<TResult>>,
             pages: (options) => query.pages(options) as AsyncIterable<QueryPage<TResult>>,
             items: (options) => query.items(options) as AsyncIterable<TResult>,
-            toPromise: () => query.toPromise() as Promise<TResult[]>
+            toPromise: (options) => query.toPromise(options) as Promise<TResult[]>
         };
     }
 
-    private keyQueryChain<TKeyDefinition extends KeyDefinition<RecordOf<TSchema>>>(
+    private multiKeyQueryChain(query: any, definition: IndexKeyDefinition<RecordOf<TSchema>>, index: Extract<keyof TIndexes, string>, remaining: readonly string[]): TypedMultiQueryChain<RecordOf<TSchema>, readonly string[]> {
+        const next = (query: any) => this.multiKeyQueryChain(query, definition, index, remaining);
+        return {
+            ...this.queryChain(query, definition, index),
+            consistent: () => next(query.consistent()),
+            limit: (chunk, hard = null) => next(query.limit(chunk, hard)),
+            ascending: () => next(query.ascending()), descending: () => next(query.descending()),
+            returnCapacity: mode => next(query.returnCapacity(mode)),
+            sortKey: attribute => {
+                if (attribute !== remaining[0]) throw new Error('Index sort conditions require an ordered contiguous prefix');
+                const comparison = query.sortKey(attribute);
+                const range = (method: string, value: unknown) => this.queryChain(comparison[method](this.table.parseSortKey(definition, value, attribute)), definition, index);
+                return {
+                    eq: value => this.multiKeyQueryChain(comparison.eq(this.table.parseSortKey(definition, value, attribute)), definition, index, remaining.slice(1)),
+                    gt: value => range('gt', value), gte: value => range('gte', value),
+                    lt: value => range('lt', value), lte: value => range('lte', value),
+                    between: (lower, upper) => this.queryChain(comparison.between(this.table.parseSortKey(definition, lower, attribute), this.table.parseSortKey(definition, upper, attribute)), definition, index),
+                    beginsWith: value => this.queryChain(comparison.beginsWith(this.table.parsePrefixValue(attribute, value)), definition, index)
+                };
+            }
+        };
+    }
+
+    private keyQueryChain<TKeyDefinition extends IndexKeyDefinition<RecordOf<TSchema>>>(
         query: any,
         definition: TKeyDefinition,
         index: Extract<keyof TIndexes, string> | null = null
@@ -1027,7 +1204,7 @@ export class TypedTableQuery<
         return chain as TypedKeyQueryChain<RecordOf<TSchema>, TKeyDefinition>;
     }
 
-    private sortKeyComparison<TKeyDefinition extends KeyDefinition<RecordOf<TSchema>>>(
+    private sortKeyComparison<TKeyDefinition extends IndexKeyDefinition<RecordOf<TSchema>>>(
         query: any,
         definition: TKeyDefinition,
         index: Extract<keyof TIndexes, string> | null = null
@@ -1048,7 +1225,7 @@ export class TypedTableQuery<
                 return this.queryChain(query.sortKey(definition.sort).between(parsedLower, parsedUpper), definition, index);
             },
             beginsWith: (value: never) => this.queryChain(query.sortKey(definition.sort).beginsWith(
-                this.table.parsePrefixValue(definition.sort!, value)), definition, index)
+                this.table.parsePrefixValue(keyComponents(definition.sort)[0], value)), definition, index)
         };
     }
 
@@ -1068,12 +1245,23 @@ export class TypedTableQuery<
             page: (options) => query.page(options) as Promise<QueryPage<TResult>>,
             pages: (options) => query.pages(options) as AsyncIterable<QueryPage<TResult>>,
             items: (options) => query.items(options) as AsyncIterable<TResult>,
-            toPromise: () => query.toPromise() as Promise<TResult[]>
+            toPromise: (options) => query.toPromise(options) as Promise<TResult[]>
         };
+    }
+
+    private updateReferences(): TypedUpdateReferences<RecordOf<TSchema>> {
+        return {ref: attribute => {
+            this.table.assertField(attribute);
+            return ref(...pathSegments(attribute)) as AttributeReference<never>;
+        }};
     }
 
     private updateStart(query: any): TypedUpdateStart<RecordOf<TSchema>, InputOf<TSchema>> {
         return {
+            assign: (attribute, expression) => {
+                this.table.assertField(attribute);
+                return this.updateChain(query.assign(attribute, this.table.parseAssignment(attribute, expression(this.updateReferences()))));
+            },
             with: (document) => this.updateChain(query.with(this.table.parseUpdate(document))),
             set: (attribute) => ({eq: (value) => this.updateChain(query.set(attribute).eq(this.table.parseUpdateField(attribute, value)))}),
             remove: (attribute) => {
@@ -1088,8 +1276,14 @@ export class TypedTableQuery<
     private updateChain<TResult = RecordOf<TSchema> | null>(query: any): TypedUpdateChain<RecordOf<TSchema>, TResult> {
         return {
             ...this.writeFinal<TResult>(query),
+            assign: (attribute, expression) => {
+                this.table.assertField(attribute);
+                return this.updateChain<TResult>(query.assign(attribute, this.table.parseAssignment(attribute, expression(this.updateReferences()))));
+            },
             onConditionFailure: () => this.conditionFailureOptions(query, (next) => this.updateChain<TResult>(next)),
             ...this.typedPredicates(query, next => this.updateChain<TResult>(next)),
+            returningUpdatedNew: () => this.updateChain<PartialProjection<RecordOf<TSchema>> | null>(query.returningUpdatedNew()),
+            returningUpdatedOld: () => this.updateChain<PartialProjection<RecordOf<TSchema>> | null>(query.returningUpdatedOld()),
             returningAllNew: () => this.updateChain<RecordOf<TSchema> | null>(query.returningAllNew()),
             returningAllOld: () => this.updateChain<RecordOf<TSchema> | null>(query.returningAllOld()),
             returningNone: () => this.updateChain<void>(query.returningNone()),
@@ -1102,13 +1296,13 @@ export class TypedTableQuery<
             },
             add: (attribute) => ({eq: (value) => this.updateChain<TResult>(query.add(attribute).eq(this.table.parseDelta(attribute, value)))}),
             delete: (attribute) => ({eq: (value) => this.updateChain<TResult>(query.delete(attribute).eq(this.table.parseDelta(attribute, value, true)))}),
-            toPromiseOrNull: () => query.toPromiseOrNull() as Promise<TResult | null>
+            toPromiseOrNull: (options) => query.toPromiseOrNull(options) as Promise<TResult | null>
         };
     }
 
     private typedPredicates<TNext>(
         query: any, next: (query: any) => TNext,
-        definition: KeyDefinition<RecordOf<TSchema>> | null = null,
+        definition: IndexKeyDefinition<RecordOf<TSchema>> | null = null,
         index: Extract<keyof TIndexes, string> | null = null
     ): TypedPredicateGroups<RecordOf<TSchema>, TNext> & {where<TAttribute extends TypedAttribute<RecordOf<TSchema>>>(key: TAttribute): TypedConditionalComparison<AttributeValue<RecordOf<TSchema>, TAttribute>, TNext>} {
         const wrapScope = (scope: PredicateScope): TypedPredicateScope<RecordOf<TSchema>> =>
@@ -1125,13 +1319,13 @@ export class TypedTableQuery<
 
     private comparison<TValue, TNext>(
         query: any, key: AttributePath, next: (query: any) => TNext,
-        definition: KeyDefinition<RecordOf<TSchema>> | null = null,
+        definition: IndexKeyDefinition<RecordOf<TSchema>> | null = null,
         index: Extract<keyof TIndexes, string> | null = null
     ): TypedConditionalComparison<TValue, TNext> {
         const assert = (attribute: AttributePath) => {
             this.table.assertIndexField(index, attribute);
             const root = pathSegments(attribute)[0];
-            if (definition !== null && (root === definition.partition || root === definition.sort)) {
+            if (definition !== null && [...keyComponents(definition.partition), ...keyComponents(definition.sort)].includes(root as string)) {
                 throw new Error('Query filters cannot reference active key attributes; use key conditions');
             }
         };
@@ -1230,8 +1424,8 @@ export class TypedTransactionWriteBuilder {
     }
 
     /** Executes the transaction and returns the DynamoDB response. */
-    toPromise(): Promise<TransactWriteItemsCommandOutput> {
-        return this.transaction.toPromise();
+    toPromise(options?: ExecutionOptions): Promise<TransactWriteItemsCommandOutput> {
+        return this.transaction.toPromise(options);
     }
 }
 
@@ -1242,6 +1436,50 @@ export function defineTable<
     const TIndexes extends IndexDefinitions<RecordOf<TSchema>> = {}
 >(options: TableDefinitionOptions<TSchema, TKey, TIndexes>): TypedTable<TSchema, TKey, TIndexes> {
     return new TypedTable(options);
+}
+
+/** Atomic reads across heterogeneous typed tables, preserving request order. */
+export class TypedTransactionReadBuilder<TResults extends unknown[] = []> {
+    private transaction: TransactionReadBuilder<unknown[]>;
+
+    constructor(db: DynamoDBClient) {
+        this.transaction = new TransactionReadBuilder<unknown[]>(db);
+    }
+
+    add<TSchema extends RecordSchema, TKey extends KeyDefinition<RecordOf<TSchema>>, TIndexes extends IndexDefinitions<RecordOf<TSchema>>,
+        const TFields extends readonly TypedAttribute<RecordOf<TSchema>>[] | undefined = undefined>(
+        table: TypedTable<TSchema, TKey, TIndexes>, key: KeyDocument<RecordOf<TSchema>, TKey>, select?: TFields
+    ): TypedTransactionReadBuilder<[...TResults, (TFields extends readonly unknown[]
+        ? ProjectedRecord<RecordOf<TSchema>, TFields[number]> : RecordOf<TSchema>) | null]> {
+        const fields = select === undefined ? undefined : uniquePaths(select);
+        fields?.forEach(field => table.assertField(field));
+        this.transaction.add(table.name, table.parseKey(key) as GetDocumentSelector, fields,
+            document => fields === undefined ? table.parseStored(document) : table.parseProjection(document, fields));
+        return this as unknown as TypedTransactionReadBuilder<[...TResults, (TFields extends readonly unknown[]
+            ? ProjectedRecord<RecordOf<TSchema>, TFields[number]> : RecordOf<TSchema>) | null]>;
+    }
+
+    returnCapacity(mode: 'TOTAL' | 'NONE' = 'TOTAL'): this {
+        this.transaction.returnCapacity(mode);
+        return this;
+    }
+
+    logger(logger: ((message: unknown) => void) | null = null): this {
+        this.transaction.logger(logger);
+        return this;
+    }
+
+    toPromise(options?: ExecutionOptions): Promise<TResults> {
+        return this.transaction.toPromise(options) as Promise<TResults>;
+    }
+
+    toResponse(options?: ExecutionOptions): Promise<DynamoResponse<TResults>> {
+        return this.transaction.toResponse(options) as Promise<DynamoResponse<TResults>>;
+    }
+}
+
+export function typedReadTransaction(db: DynamoDBClient): TypedTransactionReadBuilder {
+    return new TypedTransactionReadBuilder(db);
 }
 
 /** Starts an atomic transaction using typed table definitions. */

@@ -3,6 +3,115 @@ import {describe, test} from 'node:test';
 import {ConditionalCheckFailedException} from '@aws-sdk/client-dynamodb';
 import type {ConditionalWriteResult, DynamoResponse} from '../src/index';
 import {z} from 'zod';
+import {literal, listAppend, plus, ifNotExists} from '../src/update-expression';
+import {typedReadTransaction} from '../src/typed-table';
+
+test('infers heterogeneous atomic reads and projection-aware recoverable batches', async () => {
+    const first = defineTable({name: 'first', key: {partition: 'id'}, schema: z.object({id: z.string(), value: z.number()})});
+    const second = defineTable({name: 'second', key: {partition: 'key'}, schema: z.object({key: z.number(), label: z.string()})});
+    const fake = createFakeDynamoDB(() => ({Responses: [{Item: {value: {N: '3'}}}, {Item: {key: {N: '1'}, label: {S: 'one'}}}]}));
+    const transaction = typedReadTransaction(fake.db).add(first, {id: 'one'}, ['value']).add(second, {key: 1});
+    const result: [{value: number} | null, {key: number; label: string} | null] = await transaction.toPromise();
+    assert.deepEqual(result, [{value: 3}, {key: 1, label: 'one'}]);
+    const reads = createFakeDynamoDB(() => ({Responses: {first: [{value: {N: '3'}}]}}));
+    const outcome = await first.using(reads.db).getBatchResult([{id: 'one'}], {select: ['value']});
+    const value: number = outcome.results[0].value;
+    assert.equal(value, 3);
+    assert.equal(outcome.completed[0].input.id, 'one');
+    if (false) {
+        // @ts-expect-error Projected transaction result excludes id.
+        result[0]?.id;
+        // @ts-expect-error Projected recovery result excludes id.
+        outcome.results[0].id;
+        // @ts-expect-error Exact transaction key type is required.
+        typedReadTransaction(fake.db).add(second, {key: 'wrong'});
+    }
+});
+
+test('retains confirmed batch completion and parsed results when a later schema parse fails', async () => {
+    const table = defineTable({name: 'records', key: {partition: 'id'}, schema: z.object({id: z.string(), value: z.number()})});
+    const fake = createFakeDynamoDB(() => ({Responses: {records: [
+        {id: {S: 'good'}, value: {N: '1'}}, {id: {S: 'bad'}, value: {S: 'wrong'}}
+    ]}}));
+    const outcome = await table.using(fake.db).getBatchResult([{id: 'good'}, {id: 'bad'}]);
+    assert.equal(outcome.completed.length, 2);
+    assert.deepEqual(outcome.results, [{id: 'good', value: 1}]);
+    assert.ok(outcome.errors[0] instanceof z.ZodError);
+    assert.deepEqual(outcome.resumable, []);
+    const writes = createFakeDynamoDB();
+    await assert.rejects(table.using(writes.db).createBatchResult([{id: 'good', value: 1}, {id: 'bad', value: 'wrong'}] as any), z.ZodError);
+    assert.equal(writes.inputs.length, 0);
+});
+
+test('validates typed assignment operands without applying whole-field constraints to deltas', async () => {
+    const fake = createFakeDynamoDB();
+    const records = defineTable({name: 'assignments', key: {partition: 'id'}, schema: z.object({
+        id: z.string(), count: z.number().min(10), label: z.string(), items: z.array(z.string().min(2)).min(3)
+    })}).using(fake.db);
+    await records.update({id: 'one'}).assign('count', fields => plus(fields.ref('count'), 1))
+        .assign('items', fields => listAppend(fields.ref('items'), ['ok'])).returningNone().toPromise();
+    assert.equal(fake.inputs.length, 1);
+    assert.throws(() => records.update({id: 'one'}).assign('count', fields => fields.ref('label') as any), /incompatible schema/);
+    assert.throws(() => records.update({id: 'one'}).assign('count', () => literal(1)), /Too small/);
+    assert.throws(() => records.update({id: 'one'}).assign('items', fields => listAppend(fields.ref('items'), ['x'])), /Too small/);
+    assert.throws(() => records.update({id: 'one'}).assign('count', fields => ifNotExists(fields.ref('count'), 'bad' as any)), /number/);
+    assert.equal(fake.inputs.length, 1);
+});
+
+test('restricts typed TTL configuration to numeric top-level fields and forwards cancellation', async () => {
+    const fake = createFakeDynamoDB(command => ({TimeToLiveSpecification: command.input.TimeToLiveSpecification}));
+    const records = defineTable({name: 'expiry', key: {partition: 'id'}, schema: z.object({id: z.string(), expiresAt: z.number().optional()})}).using(fake.db);
+    const controller = new AbortController();
+    assert.deepEqual(await records.configureTimeToLive('expiresAt', true, {signal: controller.signal}), {AttributeName: 'expiresAt', Enabled: true});
+    assert.equal(fake.options[0].abortSignal, controller.signal);
+    assert.throws(() => records.configureTimeToLive('id' as any, true), /numeric/);
+    if (false) {
+        // @ts-expect-error TTL fields must store numbers.
+        records.configureTimeToLive('id', true);
+    }
+});
+
+test('validates literal secondary-index assignments before sending', () => {
+    const fake = createFakeDynamoDB();
+    const records = defineTable({name: 'literal-key', key: {partition: 'id'}, schema: z.object({id: z.string(), category: z.string()}),
+        indexes: {category: {kind: 'global', partition: 'category'}}}).using(fake.db);
+    assert.throws(() => records.update({id: 'one'}).assign('category', () => literal('')), /DynamoDB key/);
+    assert.equal(fake.inputs.length, 0);
+});
+
+test('parses nullable and tuple sparse images without synthesizing defaults', () => {
+    const table = defineTable({name: 'partial', key: {partition: 'id'}, schema: z.object({
+        id: z.string(), profile: z.object({name: z.string(), defaulted: z.number().default(1)}).nullable(),
+        tuple: z.tuple([z.string(), z.number()])
+    })});
+    assert.deepEqual(table.parsePartialStored({profile: null, tuple: [3]}), {profile: null, tuple: [3]});
+    assert.deepEqual(table.parsePartialStored({profile: {name: 'one'}}), {profile: {name: 'one'}});
+});
+
+test('infers complete GSI partitions and sequential sort components', async () => {
+    const fake = createFakeDynamoDB(() => ({Items: [{id: {S: 'one'}, tenant: {S: 't'}, region: {N: '1'}, year: {N: '2026'}, token: {B: new Uint8Array([1])}}]}));
+    const records = defineTable({name: 'multi', key: {partition: 'id'}, schema: z.object({
+        id: z.string(), tenant: z.string(), region: z.number(), year: z.number(), token: z.instanceof(Uint8Array), hidden: z.boolean()
+    }), indexes: {multi: {kind: 'global', partition: ['tenant', 'region'], sort: ['year', 'token'], projection: {type: 'KEYS_ONLY'}}}}).using(fake.db);
+    const read = () => records.index('multi').query({tenant: 't', region: 1});
+    const result = await read().limit(2).sortKey('year').eq(2026).sortKey('token').beginsWith(new Uint8Array([1])).toPromise();
+    assert.deepEqual(result.map(record => record.id), ['one']);
+    assert.equal(fake.inputs[0].IndexName, 'multi');
+    assert.throws(() => records.index('multi').query({tenant: 't'} as any), /exactly/);
+    assert.throws(() => read().where('tenant').eq('t'), /active key/);
+    if (false) {
+        // @ts-expect-error Every partition component is required.
+        records.index('multi').query({tenant: 't'});
+        // @ts-expect-error The first sort component must come first.
+        read().sortKey('token');
+        // @ts-expect-error Numeric sort values remain numeric.
+        read().sortKey('year').eq('2026');
+        // @ts-expect-error A range terminates the sort prefix.
+        read().sortKey('year').gt(2020).sortKey('token');
+        // @ts-expect-error KEYS_ONLY results omit non-key fields.
+        result[0].hidden;
+    }
+});
 
 test('keeps partial writes sparse and create old results nullable', async () => {
     const table = defineTable({name: 'sparse', key: {partition: 'id'},

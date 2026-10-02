@@ -199,7 +199,7 @@ export class QueryRequestState {
     }
 
     /** Sets the successful return payload mode for an update. */
-    setUpdateReturnValues(value: 'ALL_NEW' | 'ALL_OLD' | 'NONE'): void {
+    setUpdateReturnValues(value: 'ALL_NEW' | 'ALL_OLD' | 'UPDATED_NEW' | 'UPDATED_OLD' | 'NONE'): void {
         if (this.operation === null || this.operation.kind !== 'updateItem') {
             throw new Error('Update return values require an update operation');
         }

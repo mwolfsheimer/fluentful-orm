@@ -3,12 +3,14 @@ export async function runBatchChunks<TDocument, TResult>(
     documents: TDocument[],
     chunkSize: number,
     concurrency: number,
-    worker: (chunk: TDocument[]) => Promise<TResult>
+    worker: (chunk: TDocument[]) => Promise<TResult>,
+    signal?: AbortSignal
 ): Promise<TResult[]> {
     if (!Number.isInteger(concurrency) || concurrency < 1) {
         throw new Error('Batch concurrency must be a positive integer');
     }
 
+    signal?.throwIfAborted();
     const chunks: TDocument[][] = [];
     for (let chunkIndex = 0; chunkIndex < documents.length; chunkIndex += chunkSize) {
         chunks.push(documents.slice(chunkIndex, chunkIndex + chunkSize));
@@ -19,6 +21,10 @@ export async function runBatchChunks<TDocument, TResult>(
     let failed = false;
     const runWorker = async () => {
         while (!failed) {
+            if (signal?.aborted) {
+                failed = true;
+                throw signal.reason;
+            }
             const chunkIndex = nextChunk++;
             if (chunkIndex >= chunks.length) {
                 return;
