@@ -54,3 +54,42 @@ run("npx", ["webpack", "--config", "webpack.config.cjs"]);
 run(process.execPath, ["require.cjs"]);
 run(process.execPath, ["import.mjs"]);
 assertNoBufferTypes(path.join(fixtureDirectory, "node_modules", "@fluentful", "orm", "dist"));
+
+async function verifyBrowser() {
+  run("npx", ["playwright", "install", ...(process.env.CI ? ["--with-deps"] : []), "chromium"]);
+  const { createServer } = require("node:http");
+  const { chromium } = require("playwright");
+  const server = createServer((request, response) => {
+    const pathname = new URL(request.url, "http://localhost").pathname;
+    const file = pathname === "/browser.html" ? path.join(fixtureDirectory, "browser.html")
+      : pathname === "/dist/consumer.js" ? path.join(fixtureDirectory, "dist", "consumer.js") : null;
+    if (!file) { response.writeHead(404).end(); return; }
+    response.setHeader("Content-Type", pathname.endsWith(".js") ? "text/javascript" : "text/html");
+    response.end(readFileSync(file));
+  });
+  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  let browser;
+  try {
+    browser = await chromium.launch();
+    for (const viewport of [{ width: 1280, height: 720 }, { width: 390, height: 844 }]) {
+      const context = await browser.newContext({ viewport });
+      try {
+        const page = await context.newPage();
+        const errors = [];
+        page.on("pageerror", error => errors.push(error.message));
+        await page.goto(`http://127.0.0.1:${server.address().port}/browser.html`);
+        await page.waitForFunction(() => document.body.dataset.browserTest !== undefined);
+        const result = await page.locator("body").getAttribute("data-browser-test");
+        if (result !== "passed" || errors.length) throw new Error(`${await page.locator("body").innerText()}\n${errors.join("\n")}`);
+        console.log(`Chromium IndexedDB smoke passed (${viewport.width}x${viewport.height})`);
+      } finally { await context.close(); }
+    }
+  } finally {
+    await browser?.close();
+    await new Promise(resolve => server.close(resolve));
+  }
+}
+
+if (process.argv.includes("--browser")) {
+  verifyBrowser().catch(error => { console.error(error); process.exitCode = 1; });
+}

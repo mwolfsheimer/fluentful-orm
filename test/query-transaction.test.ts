@@ -4,6 +4,17 @@ import {QueryBuilder} from '../src/query-builder';
 import {createFakeDynamoDB} from './fake-dynamodb';
 
 describe('query - QueryBuilder transactions', () => {
+    test('snapshots retained builders when adding transaction items', async () => {
+        const fake = createFakeDynamoDB();
+        const builder = new QueryBuilder('test', fake.db);
+        const update = builder.update({id: 'one'}).set('value').eq(1);
+        const transaction = QueryBuilder.transactWrite(fake.db).addBuilder(builder);
+        update.set('value').eq(2);
+        builder.toTransactionItem();
+        await transaction.toPromise();
+        assert.deepEqual(fake.inputs[0].TransactItems[0].Update.ExpressionAttributeValues, {':value': {N: '1'}});
+    });
+
     test('inherits builder failure return values and lets transaction options override them', async () => {
         const fake = createFakeDynamoDB();
         await QueryBuilder.transactWrite(fake.db)

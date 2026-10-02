@@ -5,6 +5,7 @@
   "devDependencies": {
     "@aws-sdk/client-dynamodb": "3.1037.0",
     "@types/node": "25.6.0",
+    "playwright": "1.63.0",
     "ts-loader": "9.5.2",
     "typescript": "6.0.3",
     "webpack": "5.98.0",

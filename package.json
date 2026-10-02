@@ -36,7 +36,7 @@
   ],
   "sideEffects": false,
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "scripts": {
     "build": "tsc --project tsconfig.build.json",
@@ -48,6 +48,7 @@
     "test:persistence": "node --require ts-node/register test/persistence.test.ts",
     "test:integration": "node --require ts-node/register test/query-builder.integration.test.ts",
     "test:consumer": "node test/consumer/run.cjs",
+    "test:browser": "node test/consumer/run.cjs --browser",
     "pack:check": "npm pack --dry-run"
   },
   "peerDependencies": {

@@ -3,6 +3,9 @@ import {test} from 'node:test';
 import type {TestContext} from 'node:test';
 import {
     CreateTableCommand,
+    BatchWriteItemCommand,
+    BatchGetItemCommand,
+    TransactWriteItemsCommand,
     PutItemCommand,
     QueryCommand,
     ResourceNotFoundException,
@@ -21,6 +24,55 @@ function fixture(context: TestContext) {
     context.after(() => backend.close());
     return {backend, query: () => new QueryBuilder('records', backend.db)};
 }
+
+test('expires transaction tokens exactly at ten minutes and does not cache failures', async context => {
+    const {backend, query} = fixture(context);
+    let now = 1000000;
+    context.mock.method(Date, 'now', () => now);
+    const transaction = (capacity: 'NONE' | 'TOTAL' = 'NONE') => QueryBuilder.transactWrite(backend.db)
+        .clientRequestToken('expiry-token').returnCapacity(capacity)
+        .add('records', builder => builder.update({id: 'one'}).add('count').eq(1));
+    await transaction().toPromise();
+    now += 599999;
+    await transaction().toPromise();
+    assert.deepEqual(await query().get({id: 'one'}).toPromise(), {id: 'one', count: 1});
+    await assert.rejects(transaction('TOTAL').toPromise(), {name: 'IdempotentParameterMismatchException'});
+    now++;
+    await transaction().toPromise();
+    assert.deepEqual(await query().get({id: 'one'}).toPromise(), {id: 'one', count: 2});
+    const failed = () => QueryBuilder.transactWrite(backend.db).clientRequestToken('failed-token')
+        .add('records', builder => builder.conditionCheck({id: 'later'}).where('id').exists());
+    await assert.rejects(failed().toPromise(), {name: 'TransactionCanceledException'});
+    await query().create({id: 'later'}).toPromise();
+    await failed().toPromise();
+});
+
+test('returns SDK-shaped metadata and honors suppression for every operation family', async context => {
+    const backend = createEngine.memory([{name: 'metadata-records', key: {partition: 'id', sort: 'sort'},
+        attributes: {id: 'S', sort: 'N', alternate: 'N'}, indexes: {local: {kind: 'local', partition: 'id', sort: 'alternate'}}}]);
+    context.after(() => backend.close());
+    const item = QuerySerializer.serialiseMap({id: 'one', sort: 1, alternate: 2});
+    for (const mode of ['NONE', 'TOTAL', 'INDEXES'] as const) {
+        const single = await backend.db.send(new PutItemCommand({TableName: 'metadata-records', Item: item,
+            ReturnConsumedCapacity: mode, ReturnItemCollectionMetrics: 'SIZE'}));
+        assert.equal(single.ConsumedCapacity !== undefined, mode !== 'NONE');
+        assert.equal(Array.isArray(single.ItemCollectionMetrics), false);
+        assert.ok(single.ItemCollectionMetrics?.ItemCollectionKey);
+        const batch = await backend.db.send(new BatchWriteItemCommand({RequestItems: {'metadata-records': [{PutRequest: {Item: item}}]},
+            ReturnConsumedCapacity: mode, ReturnItemCollectionMetrics: 'SIZE'}));
+        assert.equal(Array.isArray(batch.ConsumedCapacity), mode !== 'NONE');
+        assert.equal(batch.ItemCollectionMetrics?.['metadata-records']?.length, 1);
+        const read = await backend.db.send(new BatchGetItemCommand({RequestItems: {'metadata-records': {Keys: [QuerySerializer.serialiseMap({id: 'one', sort: 1})]}}, ReturnConsumedCapacity: mode}));
+        assert.equal(Array.isArray(read.ConsumedCapacity), mode !== 'NONE');
+        const transaction = await backend.db.send(new TransactWriteItemsCommand({TransactItems: [{Put: {TableName: 'metadata-records', Item: item}}],
+            ReturnConsumedCapacity: mode, ReturnItemCollectionMetrics: 'SIZE'}));
+        assert.equal(Array.isArray(transaction.ConsumedCapacity), mode !== 'NONE');
+        assert.equal(transaction.ItemCollectionMetrics?.['metadata-records']?.length, 1);
+    }
+    const response = await new QueryBuilder('metadata-records', backend.db).create({id: 'one', sort: 1, alternate: 2})
+        .returnItemCollectionMetrics().toResponse();
+    assert.equal(response.itemCollectionMetrics.length, 1);
+});
 
 test('validates raw query predicates and operands even when no records match', async (context) => {
     const backend = createEngine.memory([{

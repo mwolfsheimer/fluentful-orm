@@ -26,6 +26,18 @@ type BatchRequestItems = NonNullable<BatchGetItemCommandInput['RequestItems']> |
 type LastEvaluatedKey = Record<string, AttributeValue>;
 type MetadataOutput = {ConsumedCapacity?: ConsumedCapacity | ConsumedCapacity[], ItemCollectionMetrics?: ItemCollectionMetrics | ItemCollectionMetrics[] | Record<string, ItemCollectionMetrics[]>};
 
+/** Unprocessed work and completed read results from one exhausted batch chunk, not the entire batch call. */
+export class BatchRetryError extends Error {
+    readonly unprocessedItems: BatchRequestItems;
+    readonly partialResults: readonly GenericDocument<unknown>[];
+    constructor(readonly operation: 'batchGetItem' | 'batchWriteItem', requestItems: BatchRequestItems, results: GenericDocument<unknown>[]) {
+        super('DynamoDB batch operation still had unprocessed items after 8 retries');
+        this.name = 'BatchRetryError';
+        this.unprocessedItems = ValueUtils.clone(requestItems);
+        this.partialResults = ValueUtils.clone(results);
+    }
+}
+
 /** Executes one QueryBuilder operation against DynamoDB and parses its results. */
 export class QueryExecutor {
     private output: GenericDocument<any>[] = [];
@@ -43,7 +55,11 @@ export class QueryExecutor {
         private requestId: string,
         private documentParser: DocumentParser,
         private projection: readonly AttributePath[] | null = null
-    ) {}
+    ) {
+        this.operation = ValueUtils.clone(operation);
+        this.documents = ValueUtils.clone(documents);
+        this.projection = ValueUtils.clone(projection);
+    }
 
     /** Executes the operation, following query/scan pages and retrying unprocessed batches. */
     execute<T>(): Promise<ExecutionResult<T>> {
@@ -77,7 +93,8 @@ export class QueryExecutor {
 
         return {
             items: items,
-            cursor: result.LastEvaluatedKey ? QuerySerializer.parseItem(result.LastEvaluatedKey) as QueryCursor : null
+            cursor: result.LastEvaluatedKey && Object.keys(result.LastEvaluatedKey).length > 0
+                ? QuerySerializer.parseItem(result.LastEvaluatedKey) as QueryCursor : null
         };
     }
 
@@ -230,7 +247,7 @@ export class QueryExecutor {
             parsed.forEach((document) => this.output.push(document));
         }
 
-        if (result.LastEvaluatedKey && (this.hardLimit === null || this.output.length < this.hardLimit)) {
+        if (result.LastEvaluatedKey && Object.keys(result.LastEvaluatedKey).length > 0 && (this.hardLimit === null || this.output.length < this.hardLimit)) {
             this.logger && this.logger({id: this.requestId, event: 'next_page'});
             return this.executeOperation<T>(result.LastEvaluatedKey);
         }
@@ -258,7 +275,7 @@ export class QueryExecutor {
             this.captureMetadata(result);
             count += result.Count || 0;
             this.logResult(result.Count || 0, result.ConsumedCapacity);
-            cursor = result.LastEvaluatedKey || null;
+            cursor = result.LastEvaluatedKey && Object.keys(result.LastEvaluatedKey).length > 0 ? result.LastEvaluatedKey : null;
         } while (cursor !== null);
 
         return count as T;
@@ -268,7 +285,7 @@ export class QueryExecutor {
         const maxBatchRetries = 8;
 
         if (this.batchRetryCount >= maxBatchRetries) {
-            return Promise.reject(new Error(`DynamoDB batch operation still had unprocessed items after ${maxBatchRetries} retries`));
+            return Promise.reject(new BatchRetryError(this.operation.kind as 'batchGetItem' | 'batchWriteItem', requestItems, this.output));
         }
 
         const maximumDelay = Math.min(25 * Math.pow(2, this.batchRetryCount), 1000);

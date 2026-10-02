@@ -4,6 +4,61 @@ import {ConditionalCheckFailedException} from '@aws-sdk/client-dynamodb';
 import type {ConditionalWriteResult, DynamoResponse} from '../src/index';
 import {z} from 'zod';
 
+test('keeps partial writes sparse and create old results nullable', async () => {
+    const table = defineTable({name: 'sparse', key: {partition: 'id'},
+        schema: z.object({id: z.string(), count: z.number().default(0), label: z.string().optional()})});
+    const fake = createFakeDynamoDB();
+    await table.using(fake.db).update({id: 'one'}).with({label: 'changed'}).returningNone().toPromise();
+    assert.deepEqual(Object.values(fake.inputs[0].ExpressionAttributeNames), ['label']);
+    assert.deepEqual(table.parseUpdate({}), {});
+    assert.deepEqual(table.parseUpdate({count: undefined}), {});
+    const old = table.using(fake.db).create({id: 'new'}).returningAllOld().returnCapacity().where('id').exists();
+    assert.equal(await old.toPromise(), null);
+    assert.equal((await old.toResponse()).value, null);
+    assert.deepEqual(await old.toResult(), {applied: true, value: null});
+    if (false) {
+        // @ts-expect-error A first put has no previous record.
+        const invalid: Promise<{id: string}> = old.toPromise();
+        void invalid;
+    }
+    assert.throws(() => defineTable({name: 'invalid', key: {partition: 'id'},
+        schema: z.object({id: z.string(), category: z.string()}),
+        indexes: {local: {kind: 'local', partition: 'category'}}}), /Local index/);
+});
+
+test('separates transformed write inputs from stored outputs', async () => {
+    const schema = z.object({id: z.string(), value: z.string().transform(Number)});
+    const fake = createFakeDynamoDB(command => command.input.Key ? {Item: QuerySerializer.serialiseMap({id: 'one', value: 3})} : {});
+    assert.throws(() => defineTable({name: 'transforms', key: {partition: 'id'}, schema})
+        .using(fake.db).create({id: 'one', value: '3'}), /outputSchema/);
+    assert.equal(fake.inputs.length, 0);
+    const table = defineTable({name: 'transforms', key: {partition: 'id'}, schema,
+        outputSchema: z.object({id: z.string(), value: z.number()})});
+    const records = table.using(fake.db);
+    assert.deepEqual(await records.create({id: 'one', value: '3'}).toPromise(), {id: 'one', value: 3});
+    assert.deepEqual(await records.get({id: 'one'}).toPromise(), {id: 'one', value: 3});
+    assert.deepEqual(await records.get({id: 'one'}).select('value').toPromise(), {value: 3});
+    assert.deepEqual(await records.createBatch([{id: 'two', value: '4'}]), [{id: 'two', value: 4}]);
+});
+
+test('validates deltas and subsets independently of stored field bounds', async () => {
+    const fake = createFakeDynamoDB();
+    const records = defineTable({name: 'deltas', key: {partition: 'id'},
+        schema: z.object({id: z.string(), count: z.number().nonnegative(), tags: z.set(z.string().min(2)).min(2)})}).using(fake.db);
+    await records.update({id: 'one'}).add('count').eq(-1).delete('tags').eq(new Set(['aa'])).returningNone().toPromise();
+    assert.deepEqual(fake.inputs[0].ExpressionAttributeValues, {':count': {N: '-1'}, ':tags': {SS: ['aa']}});
+    assert.throws(() => records.update({id: 'one'}).delete('tags').eq(new Set(['a'])), z.ZodError);
+});
+
+test('validates an entire typed batch before sending any chunk', async () => {
+    const fake = createFakeDynamoDB();
+    const records = defineTable({name: 'batch-validation', key: {partition: 'id'},
+        schema: z.object({id: z.string(), value: z.number().positive()})}).using(fake.db);
+    const documents = Array.from({length: 26}, (_, index) => ({id: String(index), value: index === 25 ? -1 : 1}));
+    await assert.rejects(records.createBatch(documents, {concurrency: 1}), z.ZodError);
+    assert.equal(fake.inputs.length, 0);
+});
+
 test('exposes typed fluent request options and metadata responses', async () => {
     const fake = createFakeDynamoDB((command) => {
         if (command.input.Item) {
@@ -377,10 +432,10 @@ describe('query - TypedTable', () => {
         const table = defineTable({
             name: 'typed-index-consistency',
             schema: recordSchema,
-            key: {partition: 'id'},
+            key: {partition: 'id', sort: 'value'},
             indexes: {
                 globalCategory: {kind: 'global', partition: 'category'},
-                localCategory: {kind: 'local', partition: 'category'}
+                localCategory: {kind: 'local', partition: 'id', sort: 'category'}
             }
         });
         const records = table.using(fake.db);
@@ -389,7 +444,7 @@ describe('query - TypedTable', () => {
             () => records.index('globalCategory').query({category: 'news'}).consistent(),
             /Global secondary index globalCategory does not support consistent reads/
         );
-        await records.index('localCategory').query({category: 'news'}).consistent().toPromise();
+        await records.index('localCategory').query({id: 'one'}).consistent().toPromise();
 
         assert.equal(fake.inputs.length, 1);
         assert.equal(fake.inputs[0].IndexName, 'localCategory');

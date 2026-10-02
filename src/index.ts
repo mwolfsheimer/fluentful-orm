@@ -4,6 +4,7 @@ export type {AttributePath, AttributeReference, DocumentPath, PathSegment} from 
 export type {ExpressionAttributeType, PredicateCallback, PredicateComparison, PredicateScope, SizeComparison} from './predicate';
 export {QueryBuilder, defineTable, createTable, deleteTable, describeTable, getTableDefinition, listTables, transactWrite} from "./query-builder";
 export {QuerySerializer} from "./query-serializer";
+export {BatchRetryError} from './query-executor';
 export {ValueUtils} from './value-utils';
 export type {DynamoResponse, ReturnConsumedCapacity, BatchGetOptions, BatchWriteOptions} from './types';
 export {createEngine} from './in-memory-dynamodb';

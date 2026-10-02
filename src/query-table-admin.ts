@@ -124,9 +124,15 @@ export class QueryTableAdmin {
     }
 
     /** Lists table names returned by DynamoDB. */
-    static listTables(db: DynamoDBClient): Promise<string[] | null> {
-        return db.send(new ListTablesCommand({}))
-            .then((result) => result.TableNames ? result.TableNames : null);
+    static async listTables(db: DynamoDBClient): Promise<string[] | null> {
+        let names: string[] | null = null;
+        let cursor: string | undefined;
+        do {
+            const result = await db.send(new ListTablesCommand(cursor ? {ExclusiveStartTableName: cursor} : {}));
+            if (result.TableNames) names = [...(names ?? []), ...result.TableNames];
+            cursor = result.LastEvaluatedTableName;
+        } while (cursor);
+        return names;
     }
 
     /** Fetches the complete raw table metadata returned by DynamoDB. */

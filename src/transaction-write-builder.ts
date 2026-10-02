@@ -2,6 +2,7 @@ import {TransactWriteItemsCommand} from '@aws-sdk/client-dynamodb';
 import type {DynamoDBClient, TransactWriteItem, TransactWriteItemsCommandOutput} from '@aws-sdk/client-dynamodb';
 import type {QueryBuilder} from './query-builder';
 import type {ReturnConsumedCapacity} from './types';
+import {ValueUtils} from './value-utils';
 
 type QueryLogger = null | ((message: any) => void);
 
@@ -54,7 +55,7 @@ export class TransactionWriteBuilder {
             throw new Error('TransactWriteItems supports at most 100 operations');
         }
 
-        this.items.push(builder.toTransactionItem(options));
+        this.items.push(ValueUtils.clone(builder.toTransactionItem(options)));
         return this;
     }
 

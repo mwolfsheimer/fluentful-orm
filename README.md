@@ -19,7 +19,7 @@ New code should normally use the typed API built around `defineTable()`. The low
 npm install @fluentful/orm @aws-sdk/client-dynamodb@^3.1037.0 zod@^4.3.6
 ```
 
-Supported environments are Node.js 18 or later and TypeScript 6. Install the required peer dependencies alongside the package: `@aws-sdk/client-dynamodb` ^3.1037.0 and `zod` ^4.3.6. Bring your own configured `DynamoDBClient`, or use the dependency-free in-memory backend in tests and local workflows.
+Supported environments are Node.js 20 or later and TypeScript 6. Install the required peer dependencies alongside the package: `@aws-sdk/client-dynamodb` ^3.1037.0 and `zod` ^4.3.6. Bring your own configured `DynamoDBClient`, or use the in-memory backend in tests and local workflows.
 
 ## License and contributions
 
@@ -139,6 +139,10 @@ try {
 
 Pass `engine.db` into application constructors that already accept `DynamoDBClient`, or use it with the lower-level `new QueryBuilder(tableName, engine.db)`. Seed records through normal create/batch APIs. `reset()` clears records and transaction request tokens but retains table definitions. It returns a promise so file and IndexedDB changes are durably written before it resolves. `close()` destroys the client and rejects later requests; file and IndexedDB engines keep their stored snapshot for the next instance. Closing more than once is safe.
 
+Persistent mutations roll back live records, definitions, and transaction tokens if saving fails. `close()` drains accepted requests and releases storage even after failed initialization. File snapshots preserve both `Uint8Array` and Node `Buffer` inputs as binary values, including binary sets. Unexpired transaction tokens survive reopening; `reset()` removes them.
+
+File engines allow one writer per snapshot, enforced with a sibling `.lock` file. Always close the engine before reopening that path. After a process crash, remove a stale lock only after verifying that no writer remains; locks are not automatically stolen. Use one canonical path, avoiding symlink aliases. IndexedDB engines detect stale snapshot writes across instances/tabs and reject them instead of overwriting another writer's work. Close and reopen a stale engine before retrying; its reads remain its own snapshot, not live cross-tab reads. These backends do not promise power-loss durability or distributed locking.
+
 Tables must be declared before use. Supply QueryBuilder-owned `DynamoDBTableDefinition` values as the optional second argument to `createEngine.file(path, [definition, ...])`, or to `createEngine.memory([definition, ...])` and `createEngine.browser(name, [definition, ...])`, for synchronous initialisation. You can also use `await QueryBuilder.createTable(definition, engine.db)`. Both paths use the same validation and translation, supporting composite keys, attribute types, global/local indexes and optional index projections without AWS request fields. Existing SDK `CreateTableCommandInput` constructor inputs remain supported for compatibility. Typed `defineTable()` describes application validation and does not create storage tables. Index projections support `ALL`, `KEYS_ONLY` and `INCLUDE`; omission preserves the existing `ALL` default.
 
 Supported QueryBuilder behaviour:
@@ -162,9 +166,13 @@ From this package:
 - `npm test` builds the package and runs the command-construction/serialization unit tests, the shared contract against memory, and fake-specific lifecycle checks. No AWS access is required.
 - `npm run test:memory` runs only the shared memory contract and fake-specific lifecycle checks.
 - `npm run test:persistence` runs the file-engine persistence tests directly.
+- `npm run test:consumer` checks packaged declarations, CJS/ESM loading, and browser bundling without launching a browser.
+- `npm run test:browser` additionally installs Chromium and executes the IndexedDB/typed API smoke fixture at desktop and mobile viewport sizes.
 - `npm run test:integration` runs every shared contract test against both memory and real DynamoDB. AWS credentials and permission to create/delete temporary test tables are required. Each run creates uniquely named tables and removes them during teardown.
 
 Command-construction, mocked retry/failure, and type-validation unit tests remain separate because they inspect generated requests or deliberately inject SDK responses. Only backend-specific behaviours such as memory reset/close and unsupported-operation errors belong in the fake lifecycle suite. Real AWS execution remains necessary to catch differences the stub does not model.
+
+Service-only shared tests exercise byte-limited pages, oversized items, resulting updates, transactions, batch wire payloads, and expression limits. They are explicitly skipped in memory. CI includes a weekly/manual AWS job when repository variable `AWS_INTEGRATION_ROLE_ARN` is configured; `AWS_INTEGRATION_REGION` defaults to `eu-west-2`. Configure the role's GitHub OIDC trust and permissions for temporary test tables before enabling it. Tests create/delete real tables and incur AWS charges. The browser job runs independently of this credential-dependent job.
 
 ## Define a table
 
@@ -193,7 +201,7 @@ key: {partition: 'id'}
 key: {partition: 'accountId', sort: 'createdAt'}
 ```
 
-Key fields must be required schema fields whose output type is `string`, `number`, or `Buffer`. Exact operations such as `get`, `update`, and `delete` require the complete key and no extra properties. A `query` accepts only the partition key because sort-key restrictions are added through `.sortKey()`.
+Key fields must be required schema fields whose output type is `string`, `number`, or `Uint8Array`. Exact operations such as `get`, `update`, and `delete` require the complete key and no extra properties. A `query` accepts only the partition key because sort-key restrictions are added through `.sortKey()`. Local indexes require a composite table key, the table's partition key, and an index sort key.
 
 Indexes use the same key shape, plus a required `kind: 'global'` or `kind: 'local'`. Their names and key fields are inferred:
 
@@ -206,7 +214,20 @@ indexes: {
 
 ### Zod input and output types
 
-`create()` and `createBatch()` accept the schema input type. Returned values use the schema output type, so Zod transforms and defaults are respected.
+`create()` and `createBatch()` accept the schema input type and store its parsed output. Schemas with transforms must provide an `outputSchema` for writes. This object schema validates stored values on reads, projections, and returned writes without running input transforms again; it must not itself contain transforms. Read-only definitions may still use a transforming `schema` without an `outputSchema`.
+
+```ts
+const measurements = defineTable({
+    name: 'measurements',
+    key: {partition: 'id'},
+    schema: z.object({id: z.string(), value: z.string().transform(Number)}),
+    outputSchema: z.object({id: z.string(), value: z.number()})
+}).using(dynamoDB);
+await measurements.create({id: 'one', value: '3'}).toPromise();
+// Reads return {id: 'one', value: 3}, not a second transformation.
+```
+
+Partial `.with()` updates parse only supplied, defined fields; omitted defaults do not overwrite existing attributes. Numeric `ADD` validates a delta, and set `ADD`/`DELETE` validate member subsets, independently of whole-field bounds. Use conditions to protect stored invariants; returned records are still schema-validated. `create().returningAllOld()` returns a nullable record because a first insertion has no old item.
 
 Use a strict object schema when records should not contain undeclared fields. If `timestamps: true` is enabled, declare optional numeric `createdAt` and `modifiedAt` fields in a strict schema as shown above.
 
@@ -986,6 +1007,8 @@ await tasks.deleteBatch(taskKeys, {concurrency: 2});
 
 Empty input arrays complete without sending a DynamoDB request: creates and gets return `[]`, while deletes return `void`. Unprocessed reads and writes are retried up to eight times with jittered backoff; the operation rejects if DynamoDB still returns unprocessed items after the final retry. When one concurrent chunk fails, no new chunks are scheduled, but already-running chunks are allowed to settle before the batch rejects.
 
+Retry exhaustion throws exported `BatchRetryError`. Its `operation`, raw SDK `unprocessedItems` map, and decoded `partialResults` describe the failing chunk only, not other concurrent chunks. For reads, the map contains `KeysAndAttributes`; for writes it contains write requests. Retry only unprocessed work, not the entire original write batch. Ordinary SDK failures preserve their original error identity and may leave an ambiguous partial outcome. Create batches validate all documents before scheduling chunks; service failures still make batches non-atomic. Binary-key deduplication compares bytes regardless of `Buffer`/`Uint8Array` representation. Duplicate write targets within one request are rejected by both AWS and memory.
+
 For legacy callers, a boolean second argument remains supported: `true` means serial chunks and `false` means unbounded concurrency. New code should use `{concurrency}`.
 
 Batch operations are not atomic and do not support per-item conditions. Use a transaction when all writes must succeed or fail together.
@@ -1135,7 +1158,9 @@ await tasks.scan()
     .toPromise();
 ```
 
-Finite JavaScript numbers are serialized without deliberately rounding them, including safe-integer boundaries and scientific notation. `undefined` object properties are omitted from creates and `.with()` updates, but an `undefined` array member is invalid. Invalid values such as non-finite numbers, symbols, functions, and empty Sets throw before the request is sent.
+Numbers must be finite and within DynamoDB's magnitude range: zero, or absolute value at least `1e-130` and below `1e126`. Decoding rejects numeric strings that do not round-trip through JavaScript's decimal number representation, rather than silently changing precise values or collapsing number-set members. This is not arbitrary-precision arithmetic: memory numeric updates still use JavaScript arithmetic. Store application values requiring more precision as strings, or use the raw AWS SDK with an appropriate number representation.
+
+`undefined` object properties are omitted from creates and `.with()` updates, but an `undefined` array member is invalid. Non-finite/out-of-range numbers, symbols, functions, empty Sets, cycles, nesting beyond 32 levels, and unsupported object instances such as `Date` or `Map` are rejected. Convert these explicitly before writing. Only own enumerable document attributes are encoded, including literal `__proto__`, `constructor`, and `hasOwnProperty` names. Binary sets deduplicate equal bytes. Malformed known AttributeValue descriptors are rejected; unknown descriptor tags retain the existing `undefined` result.
 
 Avoid relying on `undefined` to remove an existing attribute during an update. Use `.remove(field)`.
 
@@ -1219,6 +1244,8 @@ await QueryBuilder.deleteTable('temporary-tasks', dynamoDB);
 
 `defineTable`, `createTable`, `deleteTable`, `describeTable`, `getTableDefinition`, `listTables`, and `transactWrite` are also named exports from `@fluentful/orm`; each has the same behaviour as its corresponding `QueryBuilder` static helper.
 
+`listTables()` follows every `LastEvaluatedTableName` continuation. It returns all table names, not just the first service page.
+
 The existing `createTable(name, key, client)` shorthand creates an on-demand table with one string partition key. For composite keys, other key types and indexes, use the QueryBuilder-owned definition overload:
 
 ```ts
@@ -1258,6 +1285,7 @@ The normalised definition does not include a Zod schema because DynamoDB does no
 - AWS service and condition errors are propagated to the caller.
 - Typed operations can also throw `z.ZodError` before sending or while validating returned data.
 - Every fluent operation is mutable and single-use. Build a fresh operation before using `toPromise()`, `page()`, `pages()`, or `items()`.
+- Execution snapshots request configuration and submitted documents, including lazy iterators. Later mutations of a retained chain cannot change the in-flight request or its result interpretation. Transactions snapshot items when added.
 - Repeated `toPromise()` calls on the same operation return the cached promise and do not send the request twice.
 - Do not start one execution mode and then switch to another on the same operation.
 - A query requires the exact partition-key document. Exact item operations require the complete primary key.
@@ -1275,6 +1303,7 @@ The normalised definition does not include a Zod schema because DynamoDB does no
 defineTable({
     name,
     schema,
+    outputSchema?: storedOutputObjectSchema,
     key: {partition, sort?},
     indexes?: {name: {kind: 'global' | 'local', partition, sort?, projection?}},
     timestamps?: boolean

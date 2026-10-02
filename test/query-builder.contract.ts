@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {after, before, describe, test} from 'node:test';
-import {ConditionalCheckFailedException, DynamoDBServiceException, ResourceNotFoundException, TransactionCanceledException, waitUntilTableExists, waitUntilTableNotExists} from '@aws-sdk/client-dynamodb';
+import {BatchWriteItemCommand, UpdateItemCommand, ConditionalCheckFailedException, DynamoDBServiceException, ResourceNotFoundException, TransactionCanceledException, waitUntilTableExists, waitUntilTableNotExists} from '@aws-sdk/client-dynamodb';
 import type {DynamoDBClient} from '@aws-sdk/client-dynamodb';
 import {z} from 'zod';
 import {QueryBuilder} from '../src/query-builder';
@@ -27,7 +27,7 @@ async function queryUntilCount<T>(run: () => Promise<T[]>, expected: number): Pr
     return run();
 }
 
-export const queryBuilderContract = (backendName: string, dynamoDBClient: DynamoDBClient, close: () => void | Promise<void>) => describe(`query - QueryBuilder contract: ${backendName}`, {concurrency: false}, () => {
+export const queryBuilderContract = (backendName: string, dynamoDBClient: DynamoDBClient, close: () => void | Promise<void>, serviceLimits = false) => describe(`query - QueryBuilder contract: ${backendName}`, {concurrency: false}, () => {
     const suffix = `${process.pid}-${Date.now()}-${suiteId++}`;
     const tableName = `query-builder-test-${suffix}`;
     const compositeTableName = `query-builder-test-composite-${suffix}`;
@@ -140,6 +140,85 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
         assert.throws(() => query().update({id: record.id}).set(path('id', 'child')).eq(1), /key attributes/);
         assert.throws(() => query().update({id: record.id}).add(path('profile', 'score') as any).eq(1), /top-level/);
         assert.throws(() => query().get({id: record.id}).select('profile', city), /Overlapping/);
+    });
+
+    test('service byte limits paginate before filtering and reject oversized writes', {skip: !serviceLimits}, async context => {
+        const records = () => new QueryBuilder(compositeTableName, dynamoDBClient);
+        const keys = Array.from({length: 11}, (_, sort) => ({id: 'service-size-boundary', sort}));
+        context.after(() => records().deleteBatch(keys));
+        const payload = 'x'.repeat(300 * 1024);
+        const documents = keys.slice(0, 8).map(key => ({...key, payload}));
+        await records().createBatch(documents);
+        const first = await records().query({id: keys[0].id}).consistent().page<any>({limit: 100});
+        assert.ok(first.items.length > 0 && first.items.length < documents.length,
+            `Expected a partial service page, received ${first.items.length} of ${documents.length} items`);
+        assert.ok(first.cursor, 'Expected a continuation cursor at the service byte limit');
+        const remaining = [];
+        for await (const page of records().query({id: keys[0].id}).consistent().pages({cursor: first.cursor})) {
+            remaining.push(...page.items);
+        }
+        assert.deepEqual([...first.items, ...remaining], documents);
+        const empty = await records().query({id: keys[0].id}).consistent().where('payload').eq('missing').page({limit: 100});
+        assert.deepEqual(empty.items, []);
+        assert.ok(empty.cursor);
+        const all = await records().query({id: keys[0].id}).consistent().toPromise<any[]>();
+        assert.deepEqual(all, documents);
+        await assert.rejects(records().create({...keys[0], payload: 'x'.repeat(400 * 1024)}).toPromise());
+        await assert.rejects(records().update(keys[0]).set('payload').eq('x'.repeat(400 * 1024)).toPromise());
+        assert.equal((await records().get(keys[0]).consistent().toPromise<any>()).payload.length, payload.length);
+        const transaction = QueryBuilder.transactWrite(dynamoDBClient);
+        keys.forEach(key => transaction.add(compositeTableName, query => query.create({...key, payload: 'x'.repeat(390 * 1024)})));
+        await assert.rejects(transaction.toPromise());
+        assert.deepEqual(await records().query({id: keys[0].id}).consistent().toPromise(), documents);
+    });
+
+    test('service rejects oversized batch wire payloads and expression limits', {skip: !serviceLimits}, async context => {
+        const key = {id: 'service-expression-boundary'};
+        const records = () => new QueryBuilder(tableName, dynamoDBClient);
+        context.after(() => records().delete(key).toPromise());
+        await records().create({...key, value: 1}).toPromise();
+        for (const UpdateExpression of ['SET #v = :v' + ' '.repeat(4096), 'SET #v = :v' + ' + :v'.repeat(301)]) {
+            await assert.rejects(dynamoDBClient.send(new UpdateItemCommand({TableName: tableName,
+                Key: QuerySerializer.serialiseMap(key), UpdateExpression,
+                ExpressionAttributeNames: {'#v': 'value'}, ExpressionAttributeValues: {':v': {N: '1'}}})));
+        }
+        const writes = Array.from({length: 25}, (_, index) => ({PutRequest: {Item: {
+            id: {S: `wire-limit-${index}`}, payload: {L: Array.from({length: 80000}, () => ({S: ''}))}
+        }}}));
+        context.after(() => records().deleteBatch(writes.map(write => ({id: write.PutRequest.Item.id.S}))));
+        const input = {RequestItems: {[tableName]: writes}};
+        assert.ok(new TextEncoder().encode(JSON.stringify(input)).length > 16 * 1024 * 1024);
+        await assert.rejects(dynamoDBClient.send(new BatchWriteItemCommand(input)));
+        assert.equal(await records().get({id: 'wire-limit-0'}).consistent().toPromise(), null);
+    });
+
+    test('rejects duplicate batch writes without applying any part of the request', async (context) => {
+        const query = () => new QueryBuilder(tableName, dynamoDBClient);
+        const key = {id: 'duplicate-batch-contract'};
+        context.after(() => query().delete(key).toPromise());
+        await query().create({...key, value: 1}).toPromise();
+        await assert.rejects(query().createBatch([{...key, value: 2}, {...key, value: 3}]), {name: 'ValidationException'});
+        await assert.rejects(query().deleteBatch([key, key]), {name: 'ValidationException'});
+        await assert.rejects(dynamoDBClient.send(new BatchWriteItemCommand({RequestItems: {[tableName]: [
+            {PutRequest: {Item: QuerySerializer.serialiseMap({...key, value: 2})}},
+            {DeleteRequest: {Key: QuerySerializer.serialiseMap(key)}}
+        ]}})), {name: 'ValidationException'});
+        assert.deepEqual(await query().get(key).consistent().toPromise(), {...key, value: 1});
+    });
+
+    test('round trips transformed typed records and preserves omitted defaults', async (context) => {
+        const table = defineTable({name: tableName, key: {partition: 'id'},
+            schema: z.object({id: z.string(), value: z.string().transform(Number), count: z.number().default(0)}),
+            outputSchema: z.object({id: z.string(), value: z.number(), count: z.number()})});
+        const records = table.using(dynamoDBClient);
+        const key = {id: 'transformed-contract'};
+        context.after(() => new QueryBuilder(tableName, dynamoDBClient).delete(key).toPromise());
+        assert.equal(await records.create({...key, value: '3', count: 9}).returningAllOld().toPromise(), null);
+        assert.deepEqual(await records.get(key).consistent().toPromise(), {...key, value: 3, count: 9});
+        await records.update(key).with({value: '4'}).toPromise();
+        assert.deepEqual(await records.get(key).consistent().toPromise(), {...key, value: 4, count: 9});
+        await typedTransaction(dynamoDBClient).add(table, query => query.create({...key, value: '5', count: 9})).toPromise();
+        assert.deepEqual(await records.get(key).consistent().toPromise(), {...key, value: 5, count: 9});
     });
 
     test('evaluates complete functions and stored-field operands including missing values', async (context) => {

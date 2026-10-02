@@ -3,6 +3,65 @@ import {describe, test} from 'node:test';
 import {QuerySerializer} from '../src/query-serializer';
 
 describe('query - QuerySerializer', () => {
+    test('rejects malformed known AttributeValue descriptors', () => {
+        for (const descriptor of [null, {S: 1}, {BOOL: 'true'}, {NULL: false}, {S: 'one', N: '1'},
+            {L: {}}, {M: null}, {SS: []}, {NS: [1]}, {BS: [{}]}, {B: {type: 'Buffer', data: [1]}}]) {
+            assert.throws(() => QuerySerializer.parseField(descriptor), /AttributeValue/);
+        }
+    });
+
+    test('rejects lossy numbers and enforces numeric range boundaries', () => {
+        for (const value of ['9007199254740993', '0.123456789012345678901', '1x', '1e-131', '1e126']) {
+            assert.throws(() => QuerySerializer.parseField({N: value}));
+            assert.throws(() => QuerySerializer.parseField({NS: [value]}));
+        }
+        for (const value of [1e-131, 1e126, -1e126]) assert.throws(() => QuerySerializer.serialiseItem(value), /range/);
+        for (const value of [0, 1e-130, -1e-130, 1e125, Number.MAX_SAFE_INTEGER]) {
+            assert.equal(QuerySerializer.parseField(QuerySerializer.serialiseItem(value)), value);
+        }
+        assert.equal(QuerySerializer.parseField({N: '+001.2000e+2'}), 120);
+    });
+
+    test('rejects unsupported and cyclic objects while allowing shared references', () => {
+        for (const value of [new Date(), new Map(), new Error(), /pattern/]) {
+            assert.throws(() => QuerySerializer.serialiseItem(value), /unsupported object/);
+        }
+        const cycle: Record<string, unknown> = {};
+        cycle['self'] = cycle;
+        assert.throws(() => QuerySerializer.serialiseMap(cycle), /cyclic/);
+        const shared = {value: 1};
+        assert.deepEqual(QuerySerializer.parseField(QuerySerializer.serialiseItem([shared, shared])), [shared, shared]);
+        let nested: unknown = 'leaf';
+        for (let depth = 0; depth < 32; depth++) nested = {nested};
+        assert.doesNotThrow(() => QuerySerializer.serialiseMap({nested}));
+        assert.throws(() => QuerySerializer.serialiseMap({nested: {nested}}), /32 nesting/);
+        const encoded = QuerySerializer.serialiseItem(new Set([Buffer.from([1]), new Uint8Array([1])])) as {BS: Uint8Array[]};
+        assert.equal(encoded.BS.length, 1);
+    });
+
+    test('preserves special own names and ignores inherited attributes', () => {
+        const nested = Object.fromEntries([['__proto__', 'safe'], ['hasOwnProperty', 'attribute']]);
+        const document = Object.assign(Object.create({inherited: 'ignored'}), {nested});
+        Object.defineProperty(document, '__proto__', {value: nested, enumerable: true});
+        const result = QuerySerializer.parseItem(QuerySerializer.serialiseMap(document));
+        assert.deepEqual(Object.keys(result), ['nested', '__proto__']);
+        assert.deepEqual(result['__proto__'], nested);
+        assert.equal(Object.getPrototypeOf(result), Object.prototype);
+        assert.deepEqual(QuerySerializer.parseItem(Object.create({inherited: {S: 'ignored'}})), {});
+        assert.deepEqual(QuerySerializer.serialiseMap(Object.assign(Object.create(null), {id: 'one'})), {id: {S: 'one'}});
+    });
+
+    test('detaches decoded and directly encoded binary values', () => {
+        const binary = new Uint8Array([1]);
+        const encoded = QuerySerializer.serialiseObject(binary) as {B: Uint8Array};
+        const decoded = QuerySerializer.parseField({B: binary});
+        const set = QuerySerializer.parseField({BS: [binary]});
+        binary[0] = 9;
+        assert.equal(encoded.B[0], 1);
+        assert.equal(decoded[0], 1);
+        assert.equal([...set][0][0], 1);
+    });
+
     test('round trips nested values, arrays, booleans, and nulls', () => {
         const document = {
             active: true,

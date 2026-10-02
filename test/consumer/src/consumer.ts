@@ -1,5 +1,5 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { createEngine, defineTable, path, ref, QueryBuilder } from "@fluentful/orm";
+import { BatchRetryError, createEngine, defineTable, path, ref, QueryBuilder } from "@fluentful/orm";
 import type { ExpressionAttributeType, TypedPredicateScope } from "@fluentful/orm";
 import { z } from "zod";
 
@@ -61,6 +61,17 @@ async function verifyBrowserPersistence(): Promise<void> {
   const databaseName = `fluentful-orm-browser-${Date.now()}`;
   const first = createEngine.browser(databaseName);
   await QueryBuilder.createTable("browser-records", "id", first.db);
+  const transformed = defineTable({
+    name: "browser-records", key: { partition: "id" },
+    schema: z.object({ id: z.string(), value: z.string().transform(Number), count: z.number().default(0) }),
+    outputSchema: z.object({ id: z.string(), value: z.number(), count: z.number() })
+  }).using(first.db);
+  const previous: { id: string; value: number; count: number } | null = await transformed
+    .create({ id: "transformed", value: "3", count: 7 }).returningAllOld().toPromise();
+  if (previous !== null || typeof BatchRetryError !== "function") throw new Error("Packaged write contracts are incorrect.");
+  await transformed.update({ id: "transformed" }).with({ value: "4" }).toPromise();
+  const typed = await transformed.get({ id: "transformed" }).toPromise();
+  if (typed?.value !== 4 || typed.count !== 7) throw new Error("Typed browser round trip failed.");
   await new QueryBuilder("browser-records", first.db).create({
     id: "record-1",
     bytes: new Uint8Array([1, 2, 3]),

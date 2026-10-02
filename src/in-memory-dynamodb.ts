@@ -20,6 +20,7 @@ import {
 } from '@aws-sdk/client-dynamodb';
 import type {
     AttributeValue,
+    ItemCollectionMetrics,
     ConditionCheck,
     CreateTableCommandInput,
     DeleteItemCommandInput,
@@ -66,6 +67,8 @@ interface MemoryTable {
 
 interface MemorySnapshot {
     version: 1;
+    revision?: number;
+    tokens?: Array<[string, {input: TransactWriteItemsCommandInput; expires: number}]>;
     tables: Array<{
         description: TableDescription;
         items: AttributeMap[];
@@ -330,6 +333,7 @@ class InMemoryDynamoDB {
     private tables = new Map<string, MemoryTable>();
     private tokens = new Map<string, {input: TransactWriteItemsCommandInput; expires: number}>();
     private closed = false;
+    private closing: Promise<void> | null = null;
     private operation: Promise<void> = Promise.resolve();
     private readonly ready: Promise<void>;
 
@@ -340,49 +344,64 @@ class InMemoryDynamoDB {
             credentials: {accessKeyId: 'in-memory', secretAccessKey: 'in-memory'}
         });
         this.db.send = (async (command: MemoryCommand) => {
+            if (this.closed) throw new Error('In-memory DynamoDB backend is closed');
             return this.enqueue(async () => {
                 await this.ready;
-                if (this.closed) {
-                    throw new Error('In-memory DynamoDB backend is closed');
-                }
-                const response = this.execute(command);
-                if (this.mutates(command)) {
-                    await this.persistence?.save(this.snapshot());
-                }
+                const response = this.mutates(command)
+                    ? await this.persistMutation(() => this.execute(command))
+                    : this.execute(command);
                 return ValueUtils.clone(response);
             });
         }) as typeof this.db.send;
         for (const table of tables) {
             this.execute(new CreateTableCommand('name' in table ? QueryTableAdmin.toCreateTableInput(table) : table));
         }
-        this.ready = this.load();
+        this.ready = this.load().catch(async error => {
+            await this.persistence?.close?.();
+            throw error;
+        });
+        void this.ready.catch(() => undefined);
     }
 
     /** Removes all records and transaction tokens while retaining table definitions. */
     async reset(): Promise<void> {
+        if (this.closed) throw new Error('In-memory DynamoDB backend is closed');
         await this.enqueue(async () => {
             await this.ready;
-            if (this.closed) {
-                throw new Error('In-memory DynamoDB backend is closed');
-            }
-            for (const table of this.tables.values()) table.items.clear();
-            this.tokens.clear();
-            await this.persistence?.save(this.snapshot());
+            await this.persistMutation(() => {
+                for (const table of this.tables.values()) table.items.clear();
+                this.tokens.clear();
+            });
         });
     }
 
     /** Closes the client, removes table definitions, and rejects future requests. */
-    async close(): Promise<void> {
-        if (this.closed) {
-            return;
-        }
+    close(): Promise<void> {
+        if (this.closing !== null) return this.closing;
         this.closed = true;
-        await this.ready;
-        await this.operation;
-        this.tables.clear();
-        this.tokens.clear();
-        await this.persistence?.close?.();
-        this.db.destroy();
+        this.closing = (async () => {
+            await this.ready.catch(() => undefined);
+            await this.operation;
+            this.tables.clear();
+            this.tokens.clear();
+            try { await this.persistence?.close?.(); } finally { this.db.destroy(); }
+        })();
+        return this.closing;
+    }
+
+    private async persistMutation<Result>(action: () => Result): Promise<Result> {
+        if (!this.persistence) return action();
+        const tables = ValueUtils.clone(this.tables);
+        const tokens = ValueUtils.clone(this.tokens);
+        try {
+            const result = action();
+            await this.persistence.save(this.snapshot());
+            return result;
+        } catch (error) {
+            this.tables = tables;
+            this.tokens = tokens;
+            throw error;
+        }
     }
 
     private enqueue<Result>(action: () => Promise<Result>): Promise<Result> {
@@ -397,26 +416,33 @@ class InMemoryDynamoDB {
             await this.persistence?.save(this.snapshot());
             return;
         }
-        if (snapshot.version !== 1) {
+        if (snapshot === null || snapshot.version !== 1 || !Array.isArray(snapshot.tables)) {
             throw new Error('Unsupported in-memory DynamoDB persistence format');
         }
         this.tables.clear();
         for (const persistedTable of snapshot.tables) {
-            const table: MemoryTable = {
-                description: ValueUtils.clone(persistedTable.description),
-                items: new Map()
-            };
+            if (!persistedTable?.description?.TableName || !Array.isArray(persistedTable.items)) {
+                throw new Error('Invalid in-memory DynamoDB snapshot table');
+            }
+            this.execute(new CreateTableCommand(persistedTable.description as CreateTableCommandInput));
+            const table = this.table(persistedTable.description.TableName);
+            table.description = ValueUtils.clone(persistedTable.description);
             for (const persistedItem of persistedTable.items) {
                 const item = QuerySerializer.parseItem<AttributeMap, unknown>(persistedItem);
-                table.items.set(this.key(table, item), item);
+                const key = this.key(table, item);
+                this.validateIndexKeys(table, item);
+                if (table.items.has(key)) throw new Error('Duplicate key in persisted snapshot');
+                table.items.set(key, item);
             }
             this.tables.set(table.description.TableName!, table);
         }
+        this.tokens = new Map((snapshot.tokens || []).filter(([, token]) => token.expires > Date.now()));
     }
 
     private snapshot(): MemorySnapshot {
         return {
             version: 1,
+            tokens: Array.from(this.tokens).filter(([, token]) => token.expires > Date.now()),
             tables: Array.from(this.tables.values(), (table) => ({
                 description: ValueUtils.clone(table.description),
                 items: Array.from(table.items.values(), (item) => QuerySerializer.serialiseMap(item))
@@ -554,7 +580,7 @@ class InMemoryDynamoDB {
         return {ConsumedCapacity: {TableName: input.TableName, CapacityUnits: 1}};
     }
 
-    private itemCollectionMetrics(input: WriteInput, table: MemoryTable, item: Document): object {
+    private itemCollectionMetrics(input: WriteInput, table: MemoryTable, item: Document): {ItemCollectionMetrics?: ItemCollectionMetrics} {
         if (input.ReturnItemCollectionMetrics !== 'SIZE' || (table.description.LocalSecondaryIndexes || []).length === 0) {
             return {};
         }
@@ -562,10 +588,18 @@ class InMemoryDynamoDB {
         if (partition === undefined || item[partition.AttributeName!] === undefined) {
             return {};
         }
-        return {ItemCollectionMetrics: [{
+        return {ItemCollectionMetrics: {
             ItemCollectionKey: QuerySerializer.serialiseMap({[partition.AttributeName!]: item[partition.AttributeName!]}),
             SizeEstimateRangeGB: [0, 0]
-        }]};
+        }};
+    }
+
+    private groupedMetadata(input: {ReturnConsumedCapacity?: string; ReturnItemCollectionMetrics?: string}, names: string[], metrics: Record<string, ItemCollectionMetrics[]> = {}): object {
+        return {
+            ...(input.ReturnConsumedCapacity && input.ReturnConsumedCapacity !== 'NONE'
+                ? {ConsumedCapacity: [...new Set(names)].map(TableName => ({TableName, CapacityUnits: 1}))} : {}),
+            ...(input.ReturnItemCollectionMetrics === 'SIZE' && Object.keys(metrics).length > 0 ? {ItemCollectionMetrics: metrics} : {})
+        };
     }
 
     private project(item: Document, expression: string | undefined, names: Record<string, string> | undefined): Document {
@@ -594,6 +628,7 @@ class InMemoryDynamoDB {
             table.items.delete(key);
         } else {
             this.validateIndexKeys(table, next);
+            QuerySerializer.serialiseMap(next);
             table.items.set(key, ValueUtils.clone(next));
         }
         const returned = input.ReturnValues === 'ALL_OLD'
@@ -847,11 +882,12 @@ class InMemoryDynamoDB {
                         $metadata: {}
                     });
                 }
-                return {};
+                return this.groupedMetadata(input, writes.map(entry => (entry.Put || entry.Update || entry.Delete || entry.ConditionCheck)!.TableName!));
             }
         }
         const snapshot = ValueUtils.clone(this.tables);
         const targets = new Set<string>();
+        const metrics: Record<string, ItemCollectionMetrics[]> = {};
         let position = 0;
         try {
             for (const entry of writes) {
@@ -878,6 +914,10 @@ class InMemoryDynamoDB {
                 }
                 targets.add(target);
                 this.write(kind, write);
+                if (kind !== 'check') {
+                    const metric = this.itemCollectionMetrics({...write, ReturnItemCollectionMetrics: input.ReturnItemCollectionMetrics}, this.table(write.TableName), selector).ItemCollectionMetrics;
+                    if (metric) (metrics[write.TableName!] ??= []).push(metric);
+                }
                 position++;
             }
         } catch (error) {
@@ -896,7 +936,7 @@ class InMemoryDynamoDB {
         if (token !== undefined) {
             this.tokens.set(token, {input: ValueUtils.clone(input), expires: Date.now() + 600000});
         }
-        return {};
+        return this.groupedMetadata(input, writes.map(entry => (entry.Put || entry.Update || entry.Delete || entry.ConditionCheck)!.TableName!), metrics);
     }
 
     // Translate each supported SDK command into an in-memory operation.
@@ -1015,14 +1055,21 @@ class InMemoryDynamoDB {
             return this.transaction(command.input);
         }
         if (command instanceof BatchWriteItemCommand) {
+            const metrics: Record<string, ItemCollectionMetrics[]> = {};
+            const requests = Object.values(command.input.RequestItems || {}).flat();
+            if (requests.length < 1 || requests.length > 25) validation('Batch writes require between 1 and 25 operations');
             // Invalid key data rejects the request before any of its writes are applied.
             for (const [name, writes] of Object.entries(command.input.RequestItems || {})) {
                 const table = this.table(name);
+                const targets = new Set<string>();
                 for (const write of writes) {
+                    if (Number(write.PutRequest !== undefined) + Number(write.DeleteRequest !== undefined) !== 1) validation('Invalid batch write');
                     const encoded = write.PutRequest?.Item ?? write.DeleteRequest?.Key;
                     if (encoded === undefined) validation('Unsupported batch write');
                     const item: Document = QuerySerializer.parseItem(encoded);
-                    this.key(table, item, write.PutRequest === undefined);
+                    const target = this.key(table, item, write.PutRequest === undefined);
+                    if (targets.has(target)) validation('Batch write cannot target the same item twice');
+                    targets.add(target);
                     if (write.PutRequest !== undefined) this.validateIndexKeys(table, item);
                 }
             }
@@ -1035,17 +1082,24 @@ class InMemoryDynamoDB {
                     } else {
                         validation('Unsupported batch write');
                     }
+                    const selector = QuerySerializer.parseItem(write.PutRequest?.Item ?? write.DeleteRequest!.Key!);
+                    const metric = this.itemCollectionMetrics({TableName: name, ReturnItemCollectionMetrics: command.input.ReturnItemCollectionMetrics}, this.table(name), selector).ItemCollectionMetrics;
+                    if (metric) (metrics[name] ??= []).push(metric);
                 }
             }
             return {
-                ...this.metadata({ReturnConsumedCapacity: command.input.ReturnConsumedCapacity}),
+                ...this.groupedMetadata(command.input, Object.keys(command.input.RequestItems || {}), metrics),
                 UnprocessedItems: {}
             };
         }
         if (command instanceof BatchGetItemCommand) {
+            const count = Object.values(command.input.RequestItems || {}).reduce((total, request) => total + (request.Keys?.length || 0), 0);
+            if (count < 1 || count > 100) validation('Batch reads require between 1 and 100 keys');
             const responses: Record<string, AttributeMap[]> = {};
             for (const [name, request] of Object.entries(command.input.RequestItems || {})) {
                 const table = this.table(name);
+                const keys = (request.Keys || []).map(key => this.key(table, QuerySerializer.parseItem(key), true));
+                if (new Set(keys).size !== keys.length) validation('Batch read cannot target the same item twice');
                 responses[name] = (request.Keys || []).flatMap((key) => {
                     const item = table.items.get(
                         this.key(table, QuerySerializer.parseItem(key), true)
@@ -1058,7 +1112,7 @@ class InMemoryDynamoDB {
                 });
             }
             return {
-                ...this.metadata({ReturnConsumedCapacity: command.input.ReturnConsumedCapacity}),
+                ...this.groupedMetadata(command.input, Object.keys(command.input.RequestItems || {})),
                 Responses: responses,
                 UnprocessedKeys: {}
             };
@@ -1068,10 +1122,18 @@ class InMemoryDynamoDB {
 }
 
 class FilePersistence implements MemoryPersistence {
+    private lock?: import('node:fs/promises').FileHandle;
     constructor(private readonly path: string) {}
 
     async load(): Promise<MemorySnapshot | undefined> {
         const fileSystem = await nodeFileSystem();
+        await fileSystem.mkdir(directoryOf(this.path), {recursive: true});
+        try {
+            this.lock = await fileSystem.open(`${this.path}.lock`, 'wx');
+        } catch (error) {
+            if ((error as {code?: string}).code === 'EEXIST') throw new Error('File engine already has a writer; close it before reopening');
+            throw error;
+        }
         try {
             return JSON.parse(await fileSystem.readFile(this.path, 'utf8'), reviveBinary) as MemorySnapshot;
         } catch (error) {
@@ -1086,19 +1148,33 @@ class FilePersistence implements MemoryPersistence {
         const fileSystem = await nodeFileSystem();
         await fileSystem.mkdir(directoryOf(this.path), {recursive: true});
         const temporaryPath = `${this.path}.tmp`;
-        await fileSystem.writeFile(temporaryPath, JSON.stringify(snapshot, replaceBinary), 'utf8');
-        await fileSystem.rename(temporaryPath, this.path);
+        try {
+            await fileSystem.writeFile(temporaryPath, JSON.stringify(snapshot, replaceBinary), 'utf8');
+            await fileSystem.rename(temporaryPath, this.path);
+        } finally {
+            await fileSystem.rm(temporaryPath, {force: true}).catch(() => undefined);
+        }
+    }
+
+    async close(): Promise<void> {
+        if (!this.lock) return;
+        const lock = this.lock;
+        this.lock = undefined;
+        try { await lock.close(); } finally { await (await nodeFileSystem()).rm(`${this.path}.lock`, {force: true}); }
     }
 }
 
 class IndexedDBPersistence implements MemoryPersistence {
     private database?: Promise<IDBDatabase>;
+    private revision = 0;
 
     constructor(private readonly name: string) {}
 
     async load(): Promise<MemorySnapshot | undefined> {
         const database = await this.open();
-        return this.request(database.transaction('fluentful-orm', 'readonly').objectStore('fluentful-orm').get('state'));
+        const snapshot = await this.request(database.transaction('fluentful-orm', 'readonly').objectStore('fluentful-orm').get('state'));
+        this.revision = snapshot?.revision ?? 0;
+        return snapshot;
     }
 
     async save(snapshot: MemorySnapshot): Promise<void> {
@@ -1106,7 +1182,7 @@ class IndexedDBPersistence implements MemoryPersistence {
     }
 
     async close(): Promise<void> {
-        (await this.database)?.close();
+        (await this.database?.catch(() => undefined))?.close();
     }
 
     private open(): Promise<IDBDatabase> {
@@ -1116,10 +1192,19 @@ class IndexedDBPersistence implements MemoryPersistence {
             }
             this.database = new Promise((resolve, reject) => {
                 const request = indexedDB.open(this.name, 1);
+                let blocked = false;
                 request.onupgradeneeded = () => {
                     request.result.createObjectStore('fluentful-orm');
                 };
-                request.onsuccess = () => resolve(request.result);
+                request.onblocked = () => {
+                    blocked = true;
+                    reject(new Error('IndexedDB open is blocked by another connection'));
+                };
+                request.onsuccess = () => {
+                    if (blocked) { request.result.close(); return; }
+                    request.result.onversionchange = () => request.result.close();
+                    resolve(request.result);
+                };
                 request.onerror = () => reject(request.error);
             });
         }
@@ -1136,16 +1221,31 @@ class IndexedDBPersistence implements MemoryPersistence {
     private transaction(database: IDBDatabase, snapshot: MemorySnapshot): Promise<void> {
         return new Promise((resolve, reject) => {
             const transaction = database.transaction('fluentful-orm', 'readwrite');
-            transaction.objectStore('fluentful-orm').put(snapshot, 'state');
-            transaction.oncomplete = () => resolve();
-            transaction.onerror = () => reject(transaction.error);
-            transaction.onabort = () => reject(transaction.error);
+            const store = transaction.objectStore('fluentful-orm');
+            const current = store.get('state');
+            let failure: unknown;
+            const revision = this.revision + 1;
+            current.onsuccess = () => {
+                try {
+                    if ((current.result?.revision ?? 0) !== this.revision) {
+                        throw new Error('IndexedDB snapshot changed in another engine; close and reopen before writing');
+                    }
+                    store.put({...snapshot, revision}, 'state');
+                } catch (error) {
+                    failure = error;
+                    transaction.abort();
+                }
+            };
+            transaction.oncomplete = () => { this.revision = revision; resolve(); };
+            transaction.onerror = () => reject(failure ?? transaction.error ?? new Error('IndexedDB transaction failed'));
+            transaction.onabort = () => reject(failure ?? transaction.error ?? new Error('IndexedDB transaction aborted'));
         });
     }
 }
 
-function replaceBinary(_key: string, value: unknown): unknown {
-    return value instanceof Uint8Array ? {fluentfulBinary: Array.from(value)} : value;
+function replaceBinary(this: Record<string, unknown>, key: string, value: unknown): unknown {
+    const original = this[key];
+    return original instanceof Uint8Array ? {fluentfulBinary: Array.from(original)} : value;
 }
 
 function reviveBinary(_key: string, value: unknown): unknown {
@@ -1155,6 +1255,10 @@ function reviveBinary(_key: string, value: unknown): unknown {
         && Object.keys(value).length === 1
         && Array.isArray((value as {fluentfulBinary?: unknown}).fluentfulBinary)
     ) {
+        if (!(value as {fluentfulBinary: unknown[]}).fluentfulBinary.every(byte =>
+            typeof byte === 'number' && Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
+            throw new Error('Invalid binary in persisted snapshot');
+        }
         return new Uint8Array((value as {fluentfulBinary: number[]}).fluentfulBinary);
     }
     return value;

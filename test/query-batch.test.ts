@@ -4,9 +4,42 @@ import {DynamoDBClient} from '@aws-sdk/client-dynamodb';
 import {QueryBuilder} from '../src/query-builder';
 import {QuerySerializer} from '../src/query-serializer';
 import {Quewe} from '../src/quewe';
+import {BatchRetryError, QueryExecutor} from '../src/query-executor';
 import {createFakeDynamoDB} from './fake-dynamodb';
 
 describe('query - QueryBuilder pagination and batches', () => {
+    test('treats empty service cursors as terminal in every read mode', async () => {
+        for (const method of ['page', 'pages', 'items', 'count', 'all']) {
+            const fake = createFakeDynamoDB((_command, attempt) => {
+                assert.equal(attempt, 1);
+                return {Items: [], Count: 0, LastEvaluatedKey: {}};
+            });
+            const query = new QueryBuilder('test', fake.db).scan();
+            if (method === 'page') assert.deepEqual(await query.page(), {items: [], cursor: null});
+            else if (method === 'pages' || method === 'items') {
+                for await (const _entry of query[method]()) {}
+            } else if (method === 'count') assert.equal(await query.count().toPromise(), 0);
+            else assert.deepEqual(await query.toPromise(), []);
+            assert.equal(fake.inputs.length, 1);
+        }
+    });
+
+    test('deduplicates equivalent binary keys across binary prototypes', async () => {
+        const fake = createFakeDynamoDB();
+        await new QueryBuilder('test', fake.db).getBatch([{id: Buffer.from([1, 2])}, {id: new Uint8Array([1, 2])}]);
+        assert.equal(fake.inputs[0].RequestItems.test.Keys.length, 1);
+    });
+
+    test('snapshots retained builders before lazy iteration', async () => {
+        const fake = createFakeDynamoDB(() => ({Items: []}));
+        const query = new QueryBuilder('test', fake.db).scan().limit(1);
+        const pages = query.pages();
+        query.limit(99).select('changed');
+        for await (const _page of pages) {}
+        assert.equal(fake.inputs[0].Limit, 1);
+        assert.equal(fake.inputs[0].ProjectionExpression, undefined);
+    });
+
     test('returns one page and resumes from its cursor', async () => {
         const fake = createFakeDynamoDB((command, attempt) => {
             if (attempt === 1) {
@@ -405,14 +438,20 @@ describe('query - QueryBuilder pagination and batches', () => {
 
     test('rejects after eight unprocessed-item retries', async (t) => {
         t.mock.timers.enable({apis: ['setTimeout']});
-        const fake = createFakeDynamoDB((command) => ({
-            Responses: {test: []},
+        const fake = createFakeDynamoDB((command, attempt) => ({
+            Responses: {test: attempt === 1 ? [{id: {S: 'completed'}}] : []},
             UnprocessedKeys: command.input.RequestItems
         }));
 
         const expectation = assert.rejects(
             new QueryBuilder('test', fake.db).getBatch<any>([{id: 'retry-exhaustion'}]),
-            new Error('DynamoDB batch operation still had unprocessed items after 8 retries')
+            error => {
+                assert.ok(error instanceof BatchRetryError);
+                assert.equal(error.operation, 'batchGetItem');
+                assert.deepEqual(error.partialResults, [{id: 'completed'}]);
+                assert.deepEqual(error.unprocessedItems, {test: {ConsistentRead: false, Keys: [{id: {S: 'retry-exhaustion'}}]}});
+                return true;
+            }
         );
 
         for (let attempt = 0; attempt < 10; attempt++) {
@@ -433,6 +472,77 @@ describe('query - QueryBuilder pagination and batches', () => {
 
         assert.deepEqual(result, [{id: 'batch-write-retry'}]);
         assert.equal(fake.inputs.length, 2);
+    });
+
+    test('reports only unprocessed writes after retry exhaustion', async context => {
+        context.mock.timers.enable({apis: ['setTimeout']});
+        const fake = createFakeDynamoDB((command, attempt) => ({UnprocessedItems: {
+            test: attempt === 1 ? command.input.RequestItems.test.slice(1) : command.input.RequestItems.test
+        }}));
+        const pending = assert.rejects(new QueryBuilder('test', fake.db).createBatch([{id: 'done'}, {id: 'pending'}]), error => {
+            assert.ok(error instanceof BatchRetryError);
+            assert.equal(error.operation, 'batchWriteItem');
+            assert.deepEqual(error.unprocessedItems, {test: [{PutRequest: {Item: {id: {S: 'pending'}}}}]});
+            return true;
+        });
+        for (let attempt = 0; attempt < 10; attempt++) {
+            await new Promise(resolve => setImmediate(resolve));
+            context.mock.timers.runAll();
+        }
+        await pending;
+        assert.equal(fake.inputs.length, 9);
+        assert.ok(fake.inputs.slice(1).every(input => input.RequestItems.test.length === 1));
+    });
+
+    test('retains projection and consistency across shuffled partial batch reads', async context => {
+        context.mock.method(Math, 'random', () => 0);
+        const fake = createFakeDynamoDB((command, attempt) => {
+            const request = command.input.RequestItems.test;
+            assert.equal(request.ConsistentRead, true);
+            assert.equal(request.ProjectionExpression, '#id');
+            assert.deepEqual(request.ExpressionAttributeNames, {'#id': 'id'});
+            return attempt === 1 ? {
+                Responses: {test: [{id: {S: 'second'}}]},
+                UnprocessedKeys: {test: {...request, Keys: [request.Keys[0]]}}
+            } : {Responses: {test: [{id: {S: 'first'}}]}};
+        });
+        const result = await new QueryBuilder('test', fake.db).getBatch([{id: 'first'}, {id: 'second'}, {id: 'missing'}],
+            {consistentRead: true, select: ['id']});
+        assert.deepEqual(result, [{id: 'second'}, {id: 'first'}]);
+        const failure = new Error('service failed after partial success');
+        const failing = createFakeDynamoDB((command, attempt) => {
+            if (attempt === 1) return {Responses: {test: [{id: {S: 'done'}}]}, UnprocessedKeys: command.input.RequestItems};
+            throw failure;
+        });
+        await assert.rejects(new QueryBuilder('test', failing.db).getBatch([{id: 'pending'}]), error => error === failure);
+    });
+
+    test('accumulates capacity across byte-like page boundaries and empty pages', async () => {
+        const fake = createFakeDynamoDB((_command, attempt) => ({
+            Items: attempt === 1 ? [] : [{id: {S: 'last'}}],
+            LastEvaluatedKey: attempt === 1 ? {id: {S: 'first'}} : {},
+            ConsumedCapacity: {TableName: 'test', CapacityUnits: attempt}
+        }));
+        const result = await new QueryBuilder('test', fake.db).scan().toResponse();
+        assert.deepEqual(result.value, [{id: 'last'}]);
+        assert.deepEqual(result.consumedCapacity.map(entry => entry.CapacityUnits), [1, 2]);
+    });
+
+    test('accumulates SDK capacity and item collection reports across retries', async context => {
+        context.mock.method(Math, 'random', () => 0);
+        const metric = {ItemCollectionKey: {id: {S: 'one'}}, SizeEstimateRangeGB: [0, 1]};
+        const fake = createFakeDynamoDB((command, attempt) => ({
+            ConsumedCapacity: [{TableName: 'test', CapacityUnits: attempt}],
+            ItemCollectionMetrics: {test: [metric]},
+            UnprocessedItems: attempt === 1 ? command.input.RequestItems : {}
+        }));
+        const executor = new QueryExecutor(fake.db, {kind: 'batchWriteItem', input: {
+            RequestItems: {test: [{PutRequest: {Item: {id: {S: 'one'}}}}]},
+            ReturnConsumedCapacity: 'INDEXES', ReturnItemCollectionMetrics: 'SIZE'
+        }}, [{id: 'one'}], null, null, 'retry-metadata', null);
+        const response = await executor.executeResponse();
+        assert.deepEqual(response.consumedCapacity.map(entry => entry.CapacityUnits), [1, 2]);
+        assert.deepEqual(response.itemCollectionMetrics, [metric, metric]);
     });
 
     test('deduplicates batch get keys regardless of property order without serialising twice', async (t) => {

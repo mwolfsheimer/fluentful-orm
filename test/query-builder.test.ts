@@ -10,6 +10,38 @@ import {ExpressionBuilder} from '../src/expression-builder';
 import {collectPredicates} from '../src/predicate';
 import type {ExpressionTarget} from '../src/expression-builder';
 
+test('snapshots in-flight writes and accepts prototype-sensitive documents', async () => {
+    let finish!: (value: object) => void;
+    const fake = createFakeDynamoDB(() => new Promise(resolve => { finish = resolve; }));
+    const write = new QueryBuilder('test', fake.db).create({id: 'one'});
+    const pending = write.toPromise();
+    write.returningAllOld();
+    finish({});
+    assert.deepEqual(await pending, {id: 'one'});
+    assert.equal(fake.inputs[0].ReturnValues, undefined);
+    const immediate = createFakeDynamoDB();
+    const key = Object.fromEntries([['hasOwnProperty', 'one'], ['__proto__', 'two']]);
+    await new QueryBuilder('test', immediate.db).get(key).toPromise();
+    await new QueryBuilder('test', immediate.db).update(Object.assign(Object.create(null), {id: 'one'}))
+        .with({hasOwnProperty: 'value'}).toPromise();
+    assert.deepEqual(Object.keys(immediate.inputs[0].Key), ['hasOwnProperty', '__proto__']);
+});
+
+test('lists every table page and propagates subsequent page failures', async () => {
+    const fake = createFakeDynamoDB((command, attempt) => {
+        if (attempt === 1) return {TableNames: ['first'], LastEvaluatedTableName: 'first'};
+        assert.equal(command.input.ExclusiveStartTableName, 'first');
+        return {TableNames: ['second']};
+    });
+    assert.deepEqual(await QueryBuilder.listTables(fake.db), ['first', 'second']);
+    const failure = new Error('page failed');
+    const failing = createFakeDynamoDB((_command, attempt) => {
+        if (attempt === 1) return {TableNames: ['first'], LastEvaluatedTableName: 'first'};
+        throw failure;
+    });
+    await assert.rejects(QueryBuilder.listTables(failing.db), error => error === failure);
+});
+
 test('compiles scoped predicates and rolls back invalid callbacks', () => {
     const expressions = new ExpressionBuilder();
     expressions.addPredicate(collectPredicates('OR', group => group.where('status').eq('open')

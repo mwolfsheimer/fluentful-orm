@@ -4,4 +4,4 @@ import './query-builder.memory.test';
 
 const region = process.env['AWS_REGION'] ?? 'eu-west-2';
 const dynamoDBClient = new DynamoDBClient({region});
-queryBuilderContract(`DynamoDB ${region}`, dynamoDBClient, () => dynamoDBClient.destroy());
+queryBuilderContract(`DynamoDB ${region}`, dynamoDBClient, () => dynamoDBClient.destroy(), true);

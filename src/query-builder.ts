@@ -47,7 +47,8 @@ export class QueryBuilder {
     constructor(
         private tableName: string,
         private dynamoDB: DynamoDBClient,
-        private documentParser: null | ((document: unknown, projection?: readonly AttributePath[] | null) => GenericDocument<any>) = null
+        private documentParser: null | ((document: unknown, projection?: readonly AttributePath[] | null) => GenericDocument<any>) = null,
+        private inputParser = documentParser
     ) {}
 
     private with(doc: UpdateDocumentWith): UpdateWithQuery {
@@ -58,7 +59,7 @@ export class QueryBuilder {
         this._docs.push(doc);
 
         for (let key in doc) {
-            if (doc.hasOwnProperty(key) && doc[key] !== undefined && !this.request.hasKey(key)) {
+            if (Object.prototype.hasOwnProperty.call(doc, key) && doc[key] !== undefined && !this.request.hasKey(key)) {
                 this.addExpressionAttributeName(key);
                 this.addExpressionAttributeValue(key, doc[key]);
                 this.addUpdateExpression(UpdateExpressionType.SET, key);
@@ -154,8 +155,8 @@ export class QueryBuilder {
             (doc as any).createdAt = Date.now();
         }
 
-        if (this.documentParser !== null) {
-            doc = this.documentParser(doc);
+        if (this.inputParser !== null) {
+            doc = this.inputParser(doc);
         }
 
         const item = QuerySerializer.serialiseMap(doc);
@@ -166,16 +167,6 @@ export class QueryBuilder {
     }
 
     private createBatchWorker(docs: CreateDocumentWith[]): QueryBuilder {
-        const now = Date.now();
-
-        if (this._writeTimestamps) {
-            docs.forEach((doc) => (doc as any).createdAt = now);
-        }
-
-        if (this.documentParser !== null) {
-            docs = docs.map((doc) => this.documentParser!(doc));
-        }
-
         const items = docs.map((doc) => QuerySerializer.serialiseMap(doc));
         this._docs = this._docs.concat(items.map((item) => QuerySerializer.parseItem(item)));
 
@@ -193,9 +184,20 @@ export class QueryBuilder {
 
     /** Creates records in batches of 25 with configurable concurrency. */
     public createBatch<T>(docs: CreateDocumentWith[], options: BatchWriteOptions | boolean = {}): Promise<T[]> {
-        docs = ValueUtils.clone(docs) as CreateDocumentWith[];
-        return runBatchChunks(docs, 25, this.batchConcurrency(options), (chunk) => {
-            const builder = new QueryBuilder(this.tableName, this.dynamoDB, this.documentParser)
+        const concurrency = this.batchConcurrency(options);
+        try {
+            docs = ValueUtils.clone(docs) as CreateDocumentWith[];
+            if (this._writeTimestamps) {
+                const now = Date.now();
+                docs.forEach(doc => { doc['createdAt'] = now; });
+            }
+            if (this.inputParser !== null) docs = docs.map(doc => this.inputParser!(doc));
+            docs.forEach(doc => QuerySerializer.serialiseMap(doc));
+        } catch (error) {
+            return Promise.reject(error);
+        }
+        return runBatchChunks(docs, 25, concurrency, (chunk) => {
+            const builder = new QueryBuilder(this.tableName, this.dynamoDB, this.documentParser, this.inputParser)
                 .logger(this._logger)
                 .timestamps(this._writeTimestamps)
                 .createBatchWorker(chunk);
@@ -212,13 +214,7 @@ export class QueryBuilder {
 
     /** Starts a DeleteItem operation for the supplied primary key. */
     public delete(doc: DeleteDocumentWith): DeleteQuery {
-        const key: GenericDocument<GetSelector> = {};
-
-        for (const keyName in doc) {
-            if (doc.hasOwnProperty(keyName)) {
-                key[keyName] = QuerySerializer.serialiseItem(doc[keyName]);
-            }
-        }
+        const key = Object.fromEntries(Object.keys(doc).map(name => [name, QuerySerializer.serialiseItem(doc[name])]));
         this.request.startDelete(this.tableName, key);
 
         return this.deleteQueryResult();
@@ -226,13 +222,7 @@ export class QueryBuilder {
 
     /** Starts a condition-check operation for the supplied primary key. */
     public conditionCheck(doc: GetDocumentSelector): ConditionCheckQuery {
-        const key: GenericDocument<GetSelector> = {};
-
-        for (const keyName in doc) {
-            if (doc.hasOwnProperty(keyName)) {
-                key[keyName] = QuerySerializer.serialiseItem(doc[keyName]);
-            }
-        }
+        const key = Object.fromEntries(Object.keys(doc).map(name => [name, QuerySerializer.serialiseItem(doc[name])]));
         this.request.startConditionCheck(this.tableName, key);
 
         return this.conditionCheckQueryResult();
@@ -271,13 +261,7 @@ export class QueryBuilder {
 
     /** Starts an UpdateItem operation for the supplied primary key. */
     public update(doc: UpdateDocumentSelector): UpdateQuery {
-        const key: GenericDocument<GetSelector> = {};
-
-        for (const keyName in doc) {
-            if (doc.hasOwnProperty(keyName)) {
-                key[keyName] = QuerySerializer.serialiseItem(doc[keyName]);
-            }
-        }
+        const key = Object.fromEntries(Object.keys(doc).map(name => [name, QuerySerializer.serialiseItem(doc[name])]));
         this.request.startUpdate(this.tableName, key);
 
         return this.updateQuery();
@@ -285,13 +269,7 @@ export class QueryBuilder {
 
     /** Starts a GetItem operation for the supplied primary key. */
     public get(doc: GetDocumentSelector): QueryBuilder {
-        const key: GenericDocument<GetSelector> = {};
-
-        for (let keyName in doc) {
-            if (doc.hasOwnProperty(keyName)) {
-                key[keyName] = QuerySerializer.serialiseItem(doc[keyName]);
-            }
-        }
+        const key = Object.fromEntries(Object.keys(doc).map(name => [name, QuerySerializer.serialiseItem(doc[name])]));
         this.request.startGet(this.tableName, key, false);
 
         return this
@@ -327,7 +305,10 @@ export class QueryBuilder {
         const serialisedKeys: GenericDocument<GetSelector>[] = [];
         docs.forEach((doc) => {
             const serialised = QuerySerializer.serialiseMap(doc);
-            const canonical = JSON.stringify(Object.keys(serialised).sort().map((key) => [key, serialised[key]]));
+            const canonical = JSON.stringify(Object.keys(serialised).sort().map((key) => {
+                const value = serialised[key];
+                return [key, 'B' in value ? {B: Array.from(value.B)} : value];
+            }));
 
             if (seenKeys.has(canonical)) {
                 return;
@@ -938,7 +919,7 @@ export class QueryBuilder {
     /** Converts the configured operation into one transaction item. */
     public toTransactionItem(options: TransactionItemOptions = {}): TransactWriteItem {
         this.request.applyExpressions(this.expressions);
-        const operation = this.request.getOperation();
+        const operation = ValueUtils.clone(this.request.getOperation());
         const returnValues = options.returnValuesOnConditionCheckFailure;
 
         if (operation === null) {
