@@ -147,7 +147,7 @@ Supported QueryBuilder behaviour:
 - Scalar, binary, list, map and set values through the existing serializer, with cloned reads and writes to avoid shared references.
 - Generated conditions and filters: comparisons, `IN`, `contains`, existence checks, negation and `AND`; generated sort-key comparisons, `BETWEEN` and `begins_with`.
 - `SET`, `REMOVE`, numeric/set `ADD`, and set `DELETE` updates.
-- Table/index queries, sparse index membership, sort ordering, scans, projections, counts, page cursors and iterators. Page limits apply before filters, including empty filtered pages with continuation cursors.
+- Table/index queries, sparse index membership, sort ordering, scans, projections, counts, page cursors and iterators. Page limits apply before filters, including empty filtered pages with continuation cursors. String ordering uses UTF-8 bytes, binary ordering/equality uses unsigned bytes regardless of JavaScript binary prototypes, and numeric ordering is numeric.
 - Atomic cross-table write transactions and condition checks, rollback on failure, conditional failure diagnostics, duplicate-target rejection, and ten-minute transaction request-token idempotency. Typed tables and typed transactions use the same backend.
 - Create, describe, list and delete table operations.
 
@@ -900,6 +900,18 @@ response.consumedCapacity; // one entry per DynamoDB request or page
 
 `returnCapacity()` accepts `'NONE'`, `'TOTAL'`, or `'INDEXES'`; omission keeps the existing `'INDEXES'` request mode. Writes can additionally call `returnItemCollectionMetrics()` to receive approximate local-secondary-index collection sizes in `response.itemCollectionMetrics`. `create()` and `update()` also support `returningAllOld()` for a successful overwrite's previous item. Point reads support `.select(...)`; `query()` supports `.ascending()` and `.descending()`; and `scan().parallel(segment, totalSegments)` configures one parallel-scan segment.
 
+## Comparison and access rules
+
+- `.eq(['val'])` matches the entire list, not membership. Lists compare positionally, including length and duplicates; maps ignore property insertion order; DynamoDB sets ignore member order. Equality is type-sensitive (for example, a number is not its string representation, and a set is not a list). Missing attributes are distinct from stored `null`.
+- `.contains(value)` tests a substring or one list/set member. `.in(values)` compares the complete attribute against 1-100 candidates, including serializable complex values. Negation follows DynamoDB expression semantics; `.ne(value)` matches a missing attribute, including when the operand is `null`. `.eq(null)` only matches a stored null, not an absent attribute. For conditional writes that require a present value that differs, also add `.where(field).exists()`.
+- Attribute strings, including names containing dots, spaces or hyphens, are literal top-level names. Safe aliases are allocated for conditions, updates, query keys and projections (including batch reads); these strings do not select nested paths.
+- Queries require partition-key equality and at most one sort-key predicate. Key operands must be non-empty strings/binaries or finite DynamoDB-range numbers; key byte limits are enforced. Sort-key `BETWEEN` requires matching types and ordered bounds, and `beginsWith` requires string/binary operands. Typed query filters reject the active table/index keys; use key conditions instead. Base-table keys may be filtered when they are not keys of the selected index.
+- Present secondary-index keys must match their declared scalar types and cannot be null or empty; missing components keep an item out of a sparse index. Typed writes validate present key operands using their definitions before sending; memory validates the resulting items for puts, updates, batches and transactions before mutation. Index cursors contain both table and index keys. Ordering between items with equal index sort keys is unspecified.
+- Parallel scan `totalSegments` is an integer from 1 to 1,000,000, with `0 <= segment < totalSegments`. Query-only `usingIndex()` rejects unsupported operations instead of silently ignoring the selection; index scans are not exposed.
+- Scan result order is not guaranteed by DynamoDB; the memory backend's insertion order is not a portable ordering contract.
+
+The shared contract includes complex `IN`, nested list-member operands, and missing-versus-null comparisons. Run `npm run test:integration` with AWS credentials to verify these cases against live DynamoDB; passing the offline suite alone does not establish AWS parity. Nested paths, OR/grouping, additional functions, attribute-to-attribute comparisons and index scans remain separate API decisions.
+
 ## Values and serialization
 
 The serializer maps JavaScript values to DynamoDB `AttributeValue` shapes:
@@ -916,7 +928,7 @@ The serializer maps JavaScript values to DynamoDB `AttributeValue` shapes:
 
 Maps in this table mean DynamoDB maps represented by plain JavaScript objects, for example `{owner: {id: 'account-1'}}`. They are not ECMAScript `Map` instances; convert a `Map` with `Object.fromEntries()` before writing it. Arrays are DynamoDB lists, so they may be empty and may contain different serializable value types. A Set is unordered and cannot be empty. Mixed-type, boolean, or object Sets are serialized as lists and deserialize as arrays, so use a homogeneous DynamoDB-compatible Set when set behaviour matters.
 
-For typed tables, express complex fields in the Zod schema, for example `z.array(z.string())`, `z.set(z.string())`, `z.object({owner: z.string()})`, and `z.instanceof(Buffer)`. Complete arrays and sets are validated on writes and reads. A typed `.contains(value)` comparison validates `value` against the element schema for both array and Set fields, rather than expecting the whole collection:
+For typed tables, express complex fields in the Zod schema, for example `z.array(z.string())`, `z.set(z.string())`, `z.object({owner: z.string()})`, and `z.instanceof(Uint8Array)`. Complete arrays and sets are validated on writes and reads. A typed `.contains(value)` comparison validates `value` against the element schema for both array and Set fields, rather than expecting the whole collection. Collection size constraints do not restrict membership operands. Optional, nullable, default, readonly, catch, prefault, nonoptional and pipe wrappers are unwrapped for partial operands; union branches validate their respective operand schemas. Element validation/transforms remain active, but whole-field transforms and container refinements are not applied to partial operands. String substrings and sort-key prefixes validate their scalar type without requiring a complete value that satisfies the stored field's length/pattern constraints. Equality still validates the complete field schema:
 
 ```ts
 const taskSchema = z.object({
@@ -924,7 +936,7 @@ const taskSchema = z.object({
     labels: z.array(z.string()),
     tags: z.set(z.string()),
     metadata: z.object({owner: z.string()}),
-    payload: z.instanceof(Buffer)
+    payload: z.instanceof(Uint8Array)
 });
 
 const tasks = defineTable({

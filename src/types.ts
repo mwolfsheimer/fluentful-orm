@@ -113,9 +113,9 @@ export interface CreateWhereQuery {
     /** Requires the selected attribute to be less than or equal to the supplied value. */
     lte(num: string | number | Binary): CreateQuery;
     /** Requires the selected attribute to contain the supplied value. */
-    contains(val: string | number | Binary): CreateQuery;
+    contains(val: unknown): CreateQuery;
     /** Requires the selected attribute to match one of the supplied values. */
-    in(val: (string | number | Binary)[]): CreateQuery;
+    in(val: unknown[]): CreateQuery;
 }
 
 /** Negation entry point for a create condition. */
@@ -171,9 +171,9 @@ export interface DeleteWhereQuery {
     /** Requires the selected attribute to be less than or equal to the supplied value. */
     lte(num: string | number | Binary): DeleteQuery;
     /** Requires the selected attribute to contain the supplied value. */
-    contains(val: string | number | Binary): DeleteQuery;
+    contains(val: unknown): DeleteQuery;
     /** Requires the selected attribute to match one of the supplied values. */
-    in(val: (string | number | Binary)[]): DeleteQuery;
+    in(val: unknown[]): DeleteQuery;
 }
 
 /** Negation entry point for a delete condition. */
@@ -217,9 +217,9 @@ export interface ConditionCheckWhereQuery {
     /** Requires the selected attribute to be less than or equal to the supplied value. */
     lte(num: string | number | Binary): ConditionCheckQuery;
     /** Requires the selected attribute to contain the supplied value. */
-    contains(val: string | number | Binary): ConditionCheckQuery;
+    contains(val: unknown): ConditionCheckQuery;
     /** Requires the selected attribute to match one of the supplied values. */
-    in(val: (string | number | Binary)[]): ConditionCheckQuery;
+    in(val: unknown[]): ConditionCheckQuery;
 }
 
 /** Negation entry point for a condition-check condition. */
@@ -361,9 +361,9 @@ export interface QueryScanWhereNotSubQuery {
     /** Matches records where the selected attribute is less than or equal to the supplied value. */
     lte(num: string | number | Binary): SubQuery;
     /** Matches records where the selected attribute contains the supplied value. */
-    contains(val: string | number | Binary): SubQuery;
+    contains(val: unknown): SubQuery;
     /** Matches records where the selected attribute equals one supplied value. */
-    in(val: (string | number | Binary)[]): SubQuery;
+    in(val: unknown[]): SubQuery;
 }
 
 /** Negation entry point for a query or scan filter. */
@@ -405,9 +405,9 @@ export interface UpdateWhereQuery {
     /** Requires the selected attribute to be less than or equal to the supplied value. */
     lte(num: string | number | Binary): UpdateSubQuery;
     /** Requires the selected attribute to contain the supplied value. */
-    contains(val: string | number | Binary): UpdateSubQuery;
+    contains(val: unknown): UpdateSubQuery;
     /** Requires the selected attribute to match one of the supplied values. */
-    in(val: (string | number | Binary)[]): UpdateSubQuery;
+    in(val: unknown[]): UpdateSubQuery;
 }
 
 /** Negation entry point for an update condition. */

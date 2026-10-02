@@ -79,6 +79,34 @@ describe('query - QueryBuilder pagination and batches', () => {
         assert.equal(fake.inputs[1].ExclusiveStartKey.id.S, 'empty-page');
     });
 
+    test('propagates page failures after successful pages and preserves terminal empty pages', async () => {
+        const error = new Error('later page failed');
+        for (const terminal of ['all', 'pages', 'items', 'count'] as const) {
+            const fake = createFakeDynamoDB((_command, attempt) => {
+                if (attempt === 1) return {Items: [QuerySerializer.serialiseMap({id: 'first'})], Count: 1,
+                    LastEvaluatedKey: QuerySerializer.serialiseMap({id: 'first'})};
+                throw error;
+            });
+            const chain = new QueryBuilder('test', fake.db).scan();
+            if (terminal === 'all') await assert.rejects(chain.toPromise(), (failure) => failure === error);
+            else if (terminal === 'count') await assert.rejects(chain.count().toPromise(), (failure) => failure === error);
+            else {
+                const iterator = (terminal === 'pages' ? chain.pages() : chain.items())[Symbol.asyncIterator]();
+                assert.equal((await iterator.next()).done, false);
+                await assert.rejects(iterator.next(), (failure) => failure === error);
+            }
+            assert.equal(fake.inputs.length, 2);
+        }
+        const fake = createFakeDynamoDB((_command, attempt) => attempt < 4
+            ? {Items: [], LastEvaluatedKey: QuerySerializer.serialiseMap({id: `empty-${attempt}`})}
+            : {Items: []});
+        const pages = [];
+        for await (const page of new QueryBuilder('test', fake.db).scan().pages()) pages.push(page);
+        assert.equal(pages.length, 4);
+        assert.deepEqual(pages.at(-1), {items: [], cursor: null});
+        assert.equal(fake.inputs.length, 4);
+    });
+
     test('rejects invalid page options, repeat execution, and iterator service failures', async () => {
         const invalid = new QueryBuilder('test', createFakeDynamoDB().db).scan();
         assert.throws(() => invalid.page({limit: 0}), /positive integer/);

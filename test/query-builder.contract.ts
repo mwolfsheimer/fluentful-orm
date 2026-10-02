@@ -1646,6 +1646,278 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
             .toPromise();
     });
 
+    test('compares complex values by DynamoDB type, list position and map/set membership', async (context) => {
+        const binary = (bytes: number[]) => new Uint8Array(bytes);
+        const rows: Array<{label: string; value: unknown; equal: unknown; different: unknown}> = [
+            {label: 'singleton', value: ['val'], equal: ['val'], different: 'val'},
+            {label: 'ordered', value: ['a', 'b'], equal: ['a', 'b'], different: ['b', 'a']},
+            {label: 'length', value: ['a'], equal: ['a'], different: ['a', 'a']},
+            {label: 'duplicates', value: ['a', 'a', 'b'], equal: ['a', 'a', 'b'], different: ['a', 'b', 'b']},
+            {label: 'empty-list', value: [], equal: [], different: {}},
+            {label: 'nested-list', value: [{a: [1, 2]}, null, true], equal: [{a: [1, 2]}, null, true], different: [{a: [2, 1]}, null, true]},
+            {label: 'mixed-list', value: [1, '1', false], equal: [1, '1', false], different: ['1', 1, false]},
+            {label: 'map-order', value: {a: 1, b: [2]}, equal: {b: [2], a: 1}, different: {a: 1}},
+            {label: 'map-extra', value: {a: 1}, equal: {a: 1}, different: {a: 1, b: 2}},
+            {label: 'empty-map', value: {}, equal: {}, different: []},
+            {label: 'string-set', value: new Set(['a', 'b']), equal: new Set(['b', 'a']), different: ['a', 'b']},
+            {label: 'number-set', value: new Set([1, 2]), equal: new Set([2, 1]), different: new Set([1, 3])},
+            {label: 'binary-set', value: new Set([Buffer.from([1, 2]), Buffer.from([3])]),
+                equal: new Set([binary([3]), binary([1, 2])]), different: new Set([binary([1])])},
+            {label: 'boolean', value: true, equal: true, different: 1},
+            {label: 'null', value: null, equal: null, different: false},
+            {label: 'number', value: 1, equal: 1, different: '1'},
+            {label: 'empty-string', value: '', equal: '', different: null},
+            {label: 'binary', value: Buffer.from([1, 2]), equal: binary([1, 2]), different: binary([2, 1])},
+            {label: 'empty-binary', value: Buffer.alloc(0), equal: binary([]), different: ''}
+        ];
+        const documents = rows.map((row) => ({id: `matrix-${row.label}`, value: row.value}));
+        context.after(() => new QueryBuilder(tableName, dynamoDBClient).deleteBatch(documents.map(({id}) => ({id}))));
+        await new QueryBuilder(tableName, dynamoDBClient).createBatch(documents);
+        for (const row of rows) {
+            const id = `matrix-${row.label}`;
+            const comparison = () => new QueryBuilder(tableName, dynamoDBClient).scan().consistent().where('id').eq(id).where('value');
+            assert.equal((await comparison().eq(row.equal).toPromise<any[]>()).length, 1, row.label);
+            assert.equal((await comparison().eq(row.different).toPromise<any[]>()).length, 0, row.label);
+            assert.equal((await comparison().ne(row.equal).toPromise<any[]>()).length, 0, row.label);
+            assert.equal((await comparison().ne(row.different).toPromise<any[]>()).length, 1, row.label);
+            assert.equal((await comparison().in([row.different, row.equal]).toPromise<any[]>()).length, 1, row.label);
+            assert.equal((await comparison().not().in([row.equal]).toPromise<any[]>()).length, 0, row.label);
+        }
+    });
+
+    test('executes complex membership, literal-name conditions and atomic condition checks', async (context) => {
+        const id = 'complex-membership';
+        const document = {
+            id, list: ['a', {x: [1, 2]}, [3, 4], null, true, Buffer.from([5]), new Set(['x', 'y'])],
+            tags: new Set(['a', 'b']), numbers: new Set([1, 2]), bytes: new Set([Buffer.from([5])]),
+            'odd.name': {b: 2, a: [1, 2]}, 'odd-name': 'substring', text: 'full-value'
+        };
+        const query = () => new QueryBuilder(tableName, dynamoDBClient);
+        context.after(() => query().deleteBatch([{id}, {id: 'complex-marker'}, {id: 'missing-value'}]));
+        await query().create(document).toPromise();
+        for (const value of ['a', {x: [1, 2]}, [3, 4], null, true, new Uint8Array([5]), new Set(['y', 'x'])]) {
+            const matched = await query().scan().consistent().where('id').eq(id).where('list').contains(value).toPromise<any[]>();
+            assert.equal(matched.length, 1);
+        }
+        for (const value of [{x: [2, 1]}, [4, 3], new Uint8Array([6])]) {
+            assert.equal((await query().scan().consistent().where('id').eq(id).where('list').contains(value).toPromise<any[]>()).length, 0);
+        }
+        for (const [field, value] of [['tags', 'a'], ['numbers', 2], ['bytes', new Uint8Array([5])], ['text', 'val']] as const) {
+            assert.equal((await query().scan().consistent().where('id').eq(id).where(field).contains(value).toPromise<any[]>()).length, 1);
+        }
+        await query().update({id}).set('odd-name').eq('updated')
+            .where('odd.name').eq({a: [1, 2], b: 2}).where('bytes').contains(new Uint8Array([5])).toPromise();
+        await assert.rejects(query().delete({id}).where('odd.name').eq({a: [2, 1], b: 2}).toPromise(), ConditionalCheckFailedException);
+        await QueryBuilder.transactWrite(dynamoDBClient)
+            .add(tableName, (builder) => builder.conditionCheck({id}).where('odd.name').eq({a: [1, 2], b: 2}))
+            .add(tableName, (builder) => builder.create({id: 'complex-marker'})).toPromise();
+        assert.deepEqual(await query().get({id}).consistent().select('odd.name', 'odd-name').toPromise(), {
+            'odd.name': {a: [1, 2], b: 2}, 'odd-name': 'updated'
+        });
+        await query().update({id}).add('bytes').eq(new Set([new Uint8Array([5]), new Uint8Array([6])])).toPromise();
+        const added = await query().get({id}).consistent().toPromise<{bytes: Set<Uint8Array>}>();
+        assert.equal(added.bytes.size, 2);
+        await query().update({id}).delete('bytes').eq(new Set([new Uint8Array([5])])).toPromise();
+        assert.equal((await query().scan().consistent().where('id').eq(id).where('bytes').contains(new Uint8Array([5])).toPromise<any[]>()).length, 0);
+        await query().create({id: 'missing-value'}).toPromise();
+        const missing = () => query().scan().consistent().where('id').eq('missing-value').where('absent');
+        assert.equal((await missing().eq(null).toPromise<any[]>()).length, 0);
+        assert.equal((await missing().ne(null).toPromise<any[]>()).length, 1);
+        assert.equal((await missing().not().eq(null).toPromise<any[]>()).length, 1);
+        await QueryBuilder.transactWrite(dynamoDBClient)
+            .add(tableName, (builder) => builder.conditionCheck({id: 'missing-value'}).where('absent').not().exists()).toPromise();
+    });
+
+    test('distinguishes missing attributes from null in equality, inequality and negated comparisons', async (context) => {
+        const query = () => new QueryBuilder(tableName, dynamoDBClient);
+        const missingId = 'missing-inequality';
+        const nullId = 'null-inequality';
+        context.after(() => query().deleteBatch([{id: missingId}, {id: nullId}]));
+        await query().createBatch([{id: missingId, count: 0}, {id: nullId, value: null}]);
+        const operands = [null, 'value', 1, false, new Uint8Array([1]), [], {nested: [1]}, new Set(['value'])];
+        const comparison = (id: string) => query().scan().consistent().where('id').eq(id).where('value');
+        for (const value of operands) {
+            const label = JSON.stringify(QuerySerializer.serialiseItem(value));
+            assert.equal((await comparison(missingId).eq(value).toPromise<any[]>()).length, 0, `missing = ${label}`);
+            assert.equal((await comparison(missingId).ne(value).toPromise<any[]>()).length, 1, `missing <> ${label}`);
+            assert.equal((await comparison(missingId).not().eq(value).toPromise<any[]>()).length, 1, `NOT missing = ${label}`);
+            assert.equal((await comparison(missingId).not().ne(value).toPromise<any[]>()).length, 0, `NOT missing <> ${label}`);
+            assert.equal((await comparison(missingId).in([value]).toPromise<any[]>()).length, 0, `missing IN ${label}`);
+            assert.equal((await comparison(missingId).not().in([value]).toPromise<any[]>()).length, 1, `NOT missing IN ${label}`);
+            assert.equal((await comparison(nullId).eq(value).toPromise<any[]>()).length, value === null ? 1 : 0, `null = ${label}`);
+            assert.equal((await comparison(nullId).ne(value).toPromise<any[]>()).length, value === null ? 0 : 1, `null <> ${label}`);
+            await query().update({id: missingId}).add('count').eq(1).where('value').ne(value).toPromise();
+            await assert.rejects(query().update({id: missingId}).add('count').eq(1).where('value').not().ne(value).toPromise(),
+                ConditionalCheckFailedException);
+        }
+        assert.deepEqual(await query().get({id: missingId}).consistent().toPromise(), {id: missingId, count: operands.length});
+        await query().conditionCheck({id: missingId}).where('value').ne(null).toPromise();
+        await assert.rejects(query().conditionCheck({id: nullId}).where('value').ne(null).toPromise(), TransactionCanceledException);
+        await QueryBuilder.transactWrite(dynamoDBClient)
+            .add(tableName, (builder) => builder.conditionCheck({id: missingId}).where('value').ne(null))
+            .add(tableName, (builder) => builder.update({id: nullId}).set('checked').eq(true).where('value').eq(null)).toPromise();
+        await assert.rejects(query().delete({id: nullId}).where('value').ne(null).toPromise(), ConditionalCheckFailedException);
+        await query().delete({id: missingId}).where('value').ne(null).toPromise();
+        assert.equal(await query().get({id: missingId}).consistent().toPromise(), null);
+        await query().create({id: missingId}).where('value').ne(null).toPromise();
+        assert.deepEqual(await query().get({id: missingId}).consistent().toPromise(), {id: missingId});
+    });
+
+    test('validates present secondary-index key data before writes without mutating records', async (context) => {
+        const query = () => new QueryBuilder(compositeTableName, dynamoDBClient);
+        const key = {id: 'index-key-validation', sort: 1};
+        context.after(() => query().deleteBatch([key, {id: 'invalid-index', sort: 1}, {id: 'batch-marker', sort: 1}, {id: 'transaction-marker', sort: 1}]));
+        await query().create({...key, category: 'valid', value: 1}).toPromise();
+        const invalid = (error: unknown) => error instanceof DynamoDBServiceException
+            && (error.name === 'ValidationException' || error.name === 'TransactionCanceledException');
+        for (const category of [null, '', 1, [], new Uint8Array()]) {
+            await assert.rejects(query().create({...key, category}).toPromise(), invalid);
+            await assert.rejects(query().update(key).set('category').eq(category).toPromise(), invalid);
+            assert.deepEqual(await query().get(key).consistent().toPromise(), {...key, category: 'valid', value: 1});
+        }
+        await assert.rejects(query().createBatch([{id: 'batch-marker', sort: 1}, {id: 'invalid-index', sort: 1, category: 1}]), invalid);
+        assert.equal(await query().get({id: 'batch-marker', sort: 1}).consistent().toPromise(), null);
+        await assert.rejects(QueryBuilder.transactWrite(dynamoDBClient)
+            .add(compositeTableName, (builder) => builder.create({id: 'transaction-marker', sort: 1}))
+            .add(compositeTableName, (builder) => builder.update(key).set('category').eq(null)).toPromise(), invalid);
+        assert.equal(await query().get({id: 'transaction-marker', sort: 1}).consistent().toPromise(), null);
+        assert.deepEqual(await query().get(key).consistent().toPromise(), {...key, category: 'valid', value: 1});
+    });
+
+    test('orders scalar sort keys and filter ranges by numeric, UTF-8 and unsigned binary values', async (context) => {
+        const cases: Array<{kind: 'S' | 'N' | 'B'; values: Array<string | number | Uint8Array>}> = [
+            {kind: 'N', values: [-10, -2, 1, 10]},
+            {kind: 'S', values: ['A', '\uE000', '\u{10000}', '\u{10000}x']},
+            {kind: 'B', values: [Buffer.from([0]), Buffer.from([0, 255]), Buffer.from([1]), Buffer.from([255])]}
+        ];
+        const normalise = (value: unknown) => value instanceof Uint8Array ? Array.from(value) : value;
+        for (const {kind, values} of cases) {
+            const name = `query-builder-order-${kind.toLowerCase()}-${suffix}`;
+            await QueryBuilder.createTable({name, key: {partition: 'id', sort: 'sort'}, attributes: {id: 'S', sort: kind}, indexes: {}}, dynamoDBClient);
+            context.after(async () => {
+                await QueryBuilder.deleteTable(name, dynamoDBClient);
+                await waitUntilTableNotExists({client: dynamoDBClient, maxWaitTime: 60}, {TableName: name});
+            });
+            await waitUntilTableExists({client: dynamoDBClient, maxWaitTime: 60}, {TableName: name});
+            const query = () => new QueryBuilder(name, dynamoDBClient);
+            await query().createBatch([...values].reverse().map((sort) => ({id: 'p', sort, value: sort})));
+            const read = () => query().query({id: 'p'}).consistent();
+            const sorts = (items: Array<{sort: unknown}>) => items.map((item) => normalise(item.sort));
+            const expected = values.map(normalise);
+            assert.deepEqual(sorts(await read().limit(1, null).toPromise<any[]>()), expected);
+            assert.deepEqual(sorts(await read().descending().limit(1, null).toPromise<any[]>()), [...expected].reverse());
+            for (const [operator, indices] of [['eq', [1]], ['gt', [2, 3]], ['gte', [1, 2, 3]], ['lt', [0]], ['lte', [0, 1]]] as const) {
+                const keyComparison = read().sortKey('sort');
+                assert.deepEqual(sorts(await keyComparison[operator](values[1]).toPromise<any[]>()), indices.map((index) => expected[index]));
+                const filterComparison = read().where('value');
+                assert.deepEqual(sorts(await filterComparison[operator](values[1]).toPromise<any[]>()), indices.map((index) => expected[index]));
+            }
+            assert.deepEqual(sorts(await read().sortKey('sort').between(values[1], values[2]).toPromise<any[]>()), expected.slice(1, 3));
+            if (kind !== 'N') {
+                const prefix = kind === 'S' ? '\u{10000}' : new Uint8Array([0]);
+                const matches = kind === 'S' ? expected.slice(2) : expected.slice(0, 2);
+                assert.deepEqual(sorts(await read().sortKey('sort').beginsWith(prefix).toPromise<any[]>()), matches);
+            }
+            const pages = read().descending().pages<any>({limit: 1});
+            const streamed: unknown[] = [];
+            for await (const page of pages) streamed.push(...sorts(page.items));
+            assert.deepEqual(streamed, [...expected].reverse());
+        }
+    });
+
+    test('maintains sparse index entry/exit and complete cursors with duplicate index values', async (context) => {
+        const name = `query-builder-index-cursors-${suffix}`;
+        await QueryBuilder.createTable({
+            name, key: {partition: 'id'}, attributes: {id: 'S', category: 'S', rank: 'N'},
+            indexes: {category: {kind: 'global', partition: 'category', sort: 'rank',
+                projection: {type: 'INCLUDE', nonKeyAttributes: ['value']}}}
+        }, dynamoDBClient);
+        context.after(async () => {
+            await QueryBuilder.deleteTable(name, dynamoDBClient);
+            await waitUntilTableNotExists({client: dynamoDBClient, maxWaitTime: 60}, {TableName: name});
+        });
+        await waitUntilTableExists({client: dynamoDBClient, maxWaitTime: 60}, {TableName: name});
+        const query = () => new QueryBuilder(name, dynamoDBClient);
+        const documents = [
+            {id: 'a', category: 'c', rank: 1, value: 10, secret: true},
+            {id: 'b', category: 'c', rank: 1, value: 20, secret: true},
+            {id: 'c', category: 'c', rank: 2, value: 30},
+            {id: 'd', category: 'c', rank: 3, value: 40},
+            {id: 'missing-sort', category: 'c', value: 50},
+            {id: 'missing-partition', rank: 4, value: 60}
+        ];
+        await query().createBatch(documents);
+        const read = () => query().query({category: 'c'}).usingIndex('category');
+        await queryUntilCount(() => read().toPromise<any[]>(), 4);
+        for (const descending of [false, true]) {
+            const seen: string[] = [];
+            const ranks: number[] = [];
+            let cursor = null;
+            do {
+                const chain = descending ? read().descending() : read();
+                const page: {items: Array<{id: string; rank: number; secret?: boolean}>; cursor: Record<string, any> | null}
+                    = await chain.page({limit: 1, cursor});
+                for (const item of page.items) {
+                    assert.equal(item.secret, undefined);
+                    seen.push(item.id);
+                    ranks.push(item.rank);
+                }
+                cursor = page.cursor;
+                if (cursor !== null) assert.deepEqual(Object.keys(cursor).sort(), ['category', 'id', 'rank']);
+            } while (cursor !== null);
+            assert.deepEqual([...seen].sort(), ['a', 'b', 'c', 'd']);
+            assert.equal(new Set(seen).size, 4);
+            assert.deepEqual(ranks, descending ? [3, 2, 1, 1] : [1, 1, 2, 3]);
+        }
+        const first = await read().page<any>({limit: 1});
+        await assert.rejects(read().page({limit: 1, cursor: {id: first.items[0].id}}),
+            (error: unknown) => error instanceof DynamoDBServiceException && error.name === 'ValidationException');
+        assert.deepEqual((await read().select('id').where('value').gte(30).toPromise<any[]>()).map((item) => item.id), ['c', 'd']);
+        await query().update({id: 'missing-sort'}).set('rank').eq(4).toPromise();
+        assert.equal((await queryUntilCount(() => read().toPromise<any[]>(), 5)).length, 5);
+        await query().update({id: 'missing-partition'}).set('category').eq('c').toPromise();
+        assert.equal((await queryUntilCount(() => read().toPromise<any[]>(), 6)).length, 6);
+        await query().update({id: 'a'}).remove('category').toPromise();
+        assert.equal((await queryUntilCount(() => read().toPromise<any[]>(), 5)).length, 5);
+        await query().update({id: 'b'}).remove('rank').toPromise();
+        assert.equal((await queryUntilCount(() => read().toPromise<any[]>(), 4)).length, 4);
+    });
+
+    test('continues through multiple empty filtered query pages and a terminal empty page', async (context) => {
+        const documents = Array.from({length: 6}, (_, sort) => ({id: 'empty-page-matrix', sort, value: sort}));
+        const query = () => new QueryBuilder(compositeTableName, dynamoDBClient);
+        context.after(() => query().deleteBatch(documents.map(({id, sort}) => ({id, sort}))));
+        await query().createBatch(documents);
+        const read = () => query().query({id: 'empty-page-matrix'}).consistent().select('sort').where('value').eq(3);
+        const pages = [];
+        for await (const page of read().pages<{sort: number}>({limit: 1})) pages.push(page);
+        assert.deepEqual(pages.flatMap((page) => page.items), [{sort: 3}]);
+        assert.equal(pages.length >= 6, true);
+        assert.equal(pages.slice(0, 3).every((page) => page.items.length === 0 && page.cursor !== null), true);
+        assert.deepEqual(pages.at(-1), {items: [], cursor: null});
+        assert.deepEqual(await read().toPromise(), [{sort: 3}]);
+        const items = [];
+        for await (const item of read().items()) items.push(item);
+        assert.deepEqual(items, [{sort: 3}]);
+    });
+
+    test('covers every matching record once across parallel scan segments and continuations', async (context) => {
+        const query = () => new QueryBuilder(tableName, dynamoDBClient);
+        const documents = Array.from({length: 9}, (_, index) => ({id: `parallel-contract-${index}`, scope: 'parallel-contract'}));
+        context.after(() => query().deleteBatch(documents.map(({id}) => ({id}))));
+        await query().createBatch(documents);
+        const results = await Promise.all(Array.from({length: 3}, async (_, segment) => {
+            const ids: string[] = [];
+            for await (const page of query().scan().consistent().parallel(segment, 3).select('id')
+                .where('scope').eq('parallel-contract').pages<{id: string}>({limit: 1})) {
+                ids.push(...page.items.map((item) => item.id));
+            }
+            return ids;
+        }));
+        assert.deepEqual(results.flat().sort(), documents.map((document) => document.id).sort());
+        assert.equal(new Set(results.flat()).size, documents.length);
+    });
+
     test('filters scans by set membership', async () => {
         await new QueryBuilder(tableName, dynamoDBClient).createBatch([
             {id: 'tags-a', tags: new Set(['red', 'blue'])},

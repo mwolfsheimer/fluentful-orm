@@ -21,6 +21,20 @@ void client;
 void users;
 void engine;
 
+const operandTable = defineTable({
+  name: "operand-smoke",
+  schema: z.object({
+    id: z.string(),
+    sort: z.string().regex(/^ITEM#\\d+$/),
+    labels: z.array(z.string()).min(2).readonly().optional(),
+    tags: z.set(z.string()).min(2).readonly()
+  }),
+  key: { partition: "id", sort: "sort" }
+}).using(engine.db);
+
+operandTable.scan().where("labels").contains("one").where("tags").contains("one");
+operandTable.query({ id: "partition" }).sortKey().beginsWith("ITEM#");
+
 async function verifyBrowserPersistence(): Promise<void> {
   const databaseName = `fluentful-orm-browser-${Date.now()}`;
   const first = createEngine.browser(databaseName);

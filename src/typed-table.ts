@@ -1,6 +1,7 @@
 import type {DynamoDBClient, TransactWriteItemsCommandOutput} from '@aws-sdk/client-dynamodb';
 import {z} from 'zod';
 import {QueryBuilder} from './query-builder';
+import {assertDynamoKeyValue} from './dynamodb-values';
 /** Fluent modifiers for a typed point read. */
 export interface TypedGetChain<TRecord, TResult> extends TypedFinal<TResult> {
     consistent(): TypedGetChain<TRecord, TResult>;
@@ -47,7 +48,7 @@ type IndexAvailableRecord<TRecord, TTableKey extends KeyDefinition<TRecord>, TIn
     TIndex['kind'] extends 'local' ? TRecord : IndexProjectedRecord<TRecord, TTableKey, TIndex>;
 type KeyDocument<TRecord, TKey extends KeyDefinition<TRecord>> = Pick<TRecord, KeyField<TRecord, TKey>>;
 type PartitionKeyDocument<TRecord, TKey extends KeyDefinition<TRecord>> = Pick<TRecord, TKey['partition']>;
-type ComparisonValue<T> = T extends Set<infer TValue>
+type ComparisonValue<T> = T extends string ? string : T extends ReadonlySet<infer TValue>
     ? TValue
     : T extends readonly (infer TValue)[]
         ? TValue
@@ -184,7 +185,7 @@ export interface TypedSortKeyComparison<TValue, TRecord, TResult = TRecord, TSel
     /** Matches sort-key values in the inclusive range. */
     between(lower: TValue, upper: TValue): TypedQueryChain<TRecord, TResult, TSelectable>;
     /** Matches string or binary sort keys beginning with the supplied prefix. */
-    beginsWith(value: TValue extends string | Uint8Array ? TValue : never): TypedQueryChain<TRecord, TResult, TSelectable>;
+    beginsWith(value: TValue extends string ? string : TValue extends Uint8Array ? Uint8Array : never): TypedQueryChain<TRecord, TResult, TSelectable>;
 }
 
 /** Typed query chain for a composite key with a sort-key comparison entry point. */
@@ -362,7 +363,33 @@ export class TypedTable<
 
     /** Validates and returns a complete record. */
     parse(document: unknown): RecordOf<TSchema> {
-        return this.schema.parse(document) as RecordOf<TSchema>;
+        const parsed = this.schema.parse(document) as RecordOf<TSchema>;
+        this.assertKeyValues(parsed);
+        return parsed;
+    }
+
+    /** Validates partial write fields, including any present table/index key values. */
+    parseUpdate(document: unknown): Partial<RecordOf<TSchema>> {
+        const parsed = this.schema.partial().parse(document) as Partial<RecordOf<TSchema>>;
+        this.assertKeyValues(parsed);
+        return parsed;
+    }
+
+    /** Validates one SET operand and the constraints of any declared key using that field. */
+    parseUpdateField<TKey extends RecordKey<RecordOf<TSchema>>>(key: TKey, value: unknown): RecordOf<TSchema>[TKey] {
+        const parsed = this.parseField(key, value);
+        this.assertKeyValues({[key]: parsed});
+        return parsed;
+    }
+
+    private assertKeyValues(document: AnyRecord): void {
+        for (const definition of [this.key, ...Object.values(this.indexes)]) {
+            for (const field of this.keyFields(definition)) {
+                if (Object.prototype.hasOwnProperty.call(document, field) && document[field] !== undefined) {
+                    assertDynamoKeyValue(document[field], field === definition.sort);
+                }
+            }
+        }
     }
 
     /** Validates and returns only the fields selected by a projected read. */
@@ -396,21 +423,37 @@ export class TypedTable<
 
     /** Validates a value for a `contains` comparison, including set and array element types. */
     parseContainsValue<TKey extends RecordKey<RecordOf<TSchema>>>(key: TKey, value: unknown): unknown {
-        let schema = this.fieldSchema(key);
+        return this.operandSchema(this.fieldSchema(key), true).parse(value);
+    }
 
-        while (schema instanceof z.ZodOptional || schema instanceof z.ZodNullable || schema instanceof z.ZodDefault) {
-            schema = schema.unwrap() as z.ZodType;
+    /** Validates a partial string/binary prefix, not a complete stored key. */
+    parsePrefixValue(key: string, value: unknown): unknown {
+        const parsed = this.operandSchema(this.fieldSchema(key), false).parse(value);
+        if (typeof parsed !== 'string' && !(parsed instanceof Uint8Array)) {
+            throw new Error('Sort-key prefix requires a string or binary value');
         }
+        return parsed;
+    }
 
-        if (schema instanceof z.ZodSet) {
-            return Array.from(schema.parse(new Set([value])))[0];
+    private operandSchema(schema: z.ZodType, membership: boolean): z.ZodType {
+        if (schema instanceof z.ZodOptional || schema instanceof z.ZodNullable || schema instanceof z.ZodDefault
+            || schema instanceof z.ZodReadonly || schema instanceof z.ZodCatch || schema instanceof z.ZodNonOptional
+            || schema instanceof z.ZodPrefault) {
+            return this.operandSchema(schema.unwrap() as z.ZodType, membership);
         }
-
-        if (schema instanceof z.ZodArray) {
-            return schema.parse([value])[0];
+        if (schema instanceof z.ZodPipe) {
+            return this.operandSchema(schema.in as z.ZodType, membership);
         }
-
-        return schema.parse(value);
+        if (schema instanceof z.ZodUnion) {
+            return z.union(schema.options.map((option) => this.operandSchema(option as z.ZodType, membership)));
+        }
+        if (schema instanceof z.ZodString
+            || (schema instanceof z.ZodLiteral && Array.from(schema.values).every((value) => typeof value === 'string'))
+            || (schema instanceof z.ZodEnum && schema.options.every((value) => typeof value === 'string'))) return z.string();
+        if (!membership && schema instanceof z.ZodCustom) return schema.clone({...schema.def, checks: []});
+        if (membership && schema instanceof z.ZodSet) return schema.def.valueType as z.ZodType;
+        if (membership && schema instanceof z.ZodArray) return schema.element as z.ZodType;
+        return schema;
     }
 
     /** Throws if a field is not present in the table schema. */
@@ -420,7 +463,7 @@ export class TypedTable<
 
     /** Validates an exact primary key document. */
     parseKey(document: unknown): KeyDocument<RecordOf<TSchema>, TKey> {
-        return this.parseExactKey(document, this.keyFields(this.key), `Typed table ${this.name} key`) as KeyDocument<RecordOf<TSchema>, TKey>;
+        return this.parseExactKey(document, this.keyFields(this.key), `Typed table ${this.name} key`, this.key.sort) as KeyDocument<RecordOf<TSchema>, TKey>;
     }
 
     /** Validates a primary partition-key document without requiring a sort key. */
@@ -506,7 +549,7 @@ export class TypedTable<
         return definition.sort === undefined ? [definition.partition] : [definition.partition, definition.sort];
     }
 
-    private parseExactKey(document: unknown, expected: readonly string[], label: string): AnyRecord {
+    private parseExactKey(document: unknown, expected: readonly string[], label: string, sort?: string): AnyRecord {
         const value = document as AnyRecord;
         const actualKeys = value && typeof value === 'object' ? Object.keys(value) : [];
         const expectedKeys = new Set<string>(expected);
@@ -515,7 +558,9 @@ export class TypedTable<
             throw new Error(`${label} must contain exactly: ${expected.join(', ')}`);
         }
 
-        return this.parseFields(value, expected);
+        const parsed = this.parseFields(value, expected);
+        expected.forEach((field) => assertDynamoKeyValue(parsed[field], field === sort));
+        return parsed;
     }
 
     private fieldSchema(field: string): z.ZodType {
@@ -706,15 +751,15 @@ export class TypedTableQuery<
     private readChain<
         TResult = RecordOf<TSchema>,
         TSelectable = TResult
-    >(query: any): TypedReadChain<RecordOf<TSchema>, TResult, TSelectable> {
+    >(query: any, definition: KeyDefinition<RecordOf<TSchema>> | null = null): TypedReadChain<RecordOf<TSchema>, TResult, TSelectable> {
         return {
             ...this.final<TResult[]>(query),
-            consistent: () => this.readChain<TResult, TSelectable>(query.consistent()),
-            returnCapacity: (mode) => this.readChain<TResult, TSelectable>(query.returnCapacity(mode)),
-            where: (key) => this.filterComparison(query.where(key), key, (next) => this.readChain<TResult, TSelectable>(next)),
+            consistent: () => this.readChain<TResult, TSelectable>(query.consistent(), definition),
+            returnCapacity: (mode) => this.readChain<TResult, TSelectable>(query.returnCapacity(mode), definition),
+            where: (key) => this.filterComparison(query.where(key), key, (next) => this.readChain<TResult, TSelectable>(next, definition), definition),
             select: (...attributes) => {
                 attributes.forEach((attribute) => this.table.assertField(attribute));
-                return this.readChain<Pick<TSelectable, typeof attributes[number]>, Pick<TSelectable, typeof attributes[number]>>(query.select(...attributes));
+                return this.readChain<Pick<TSelectable, typeof attributes[number]>, Pick<TSelectable, typeof attributes[number]>>(query.select(...attributes), definition);
             },
             count: () => this.final<number>(query.count()),
             page: (options) => query.page(options) as Promise<QueryPage<TResult>>,
@@ -727,18 +772,18 @@ export class TypedTableQuery<
     private queryChain<
         TResult = RecordOf<TSchema>,
         TSelectable = TResult
-    >(query: any): TypedQueryChain<RecordOf<TSchema>, TResult, TSelectable> {
+    >(query: any, definition: KeyDefinition<RecordOf<TSchema>> = this.table.key): TypedQueryChain<RecordOf<TSchema>, TResult, TSelectable> {
         return {
             ...this.final<TResult[]>(query),
-            limit: (chunkSize, hardLimit = null) => this.queryChain<TResult, TSelectable>(query.limit(chunkSize, hardLimit)),
-            consistent: () => this.queryChain<TResult, TSelectable>(query.consistent()),
-            returnCapacity: (mode) => this.queryChain<TResult, TSelectable>(query.returnCapacity(mode)),
-            ascending: () => this.queryChain<TResult, TSelectable>(query.ascending()),
-            descending: () => this.queryChain<TResult, TSelectable>(query.descending()),
-            where: (key) => this.filterComparison(query.where(key), key, (next) => this.readChain<TResult, TSelectable>(next)),
+            limit: (chunkSize, hardLimit = null) => this.queryChain<TResult, TSelectable>(query.limit(chunkSize, hardLimit), definition),
+            consistent: () => this.queryChain<TResult, TSelectable>(query.consistent(), definition),
+            returnCapacity: (mode) => this.queryChain<TResult, TSelectable>(query.returnCapacity(mode), definition),
+            ascending: () => this.queryChain<TResult, TSelectable>(query.ascending(), definition),
+            descending: () => this.queryChain<TResult, TSelectable>(query.descending(), definition),
+            where: (key) => this.filterComparison(query.where(key), key, (next) => this.readChain<TResult, TSelectable>(next, definition), definition),
             select: (...attributes) => {
                 attributes.forEach((attribute) => this.table.assertField(attribute));
-                return this.queryChain<Pick<TSelectable, typeof attributes[number]>, Pick<TSelectable, typeof attributes[number]>>(query.select(...attributes));
+                return this.queryChain<Pick<TSelectable, typeof attributes[number]>, Pick<TSelectable, typeof attributes[number]>>(query.select(...attributes), definition);
             },
             count: () => this.final<number>(query.count()),
             page: (options) => query.page(options) as Promise<QueryPage<TResult>>,
@@ -752,7 +797,7 @@ export class TypedTableQuery<
         query: any,
         definition: TKeyDefinition
     ): TypedKeyQueryChain<RecordOf<TSchema>, TKeyDefinition> {
-        const chain: TypedQueryChain<RecordOf<TSchema>> & {sortKey?: () => TypedSortKeyComparison<unknown, RecordOf<TSchema>>} = this.queryChain(query);
+        const chain: TypedQueryChain<RecordOf<TSchema>> & {sortKey?: () => TypedSortKeyComparison<unknown, RecordOf<TSchema>>} = this.queryChain(query, definition);
         if (definition.sort !== undefined) {
             chain.sortKey = () => this.sortKeyComparison(query, definition);
         }
@@ -765,7 +810,7 @@ export class TypedTableQuery<
     ): TypedSortKeyComparison<unknown, RecordOf<TSchema>> {
         const compare = (method: string, value: unknown) => {
             const parsed = this.table.parseSortKey(definition, value);
-            return this.queryChain(query.sortKey(definition.sort)[method](parsed));
+            return this.queryChain(query.sortKey(definition.sort)[method](parsed), definition);
         };
         return {
             eq: (value) => compare('eq', value),
@@ -776,9 +821,10 @@ export class TypedTableQuery<
             between: (lower, upper) => {
                 const parsedLower = this.table.parseSortKey(definition, lower);
                 const parsedUpper = this.table.parseSortKey(definition, upper);
-                return this.queryChain(query.sortKey(definition.sort).between(parsedLower, parsedUpper));
+                return this.queryChain(query.sortKey(definition.sort).between(parsedLower, parsedUpper), definition);
             },
-            beginsWith: (value: never) => compare('beginsWith', value)
+            beginsWith: (value: never) => this.queryChain(query.sortKey(definition.sort).beginsWith(
+                this.table.parsePrefixValue(definition.sort!, value)), definition)
         };
     }
 
@@ -804,8 +850,8 @@ export class TypedTableQuery<
 
     private updateStart(query: any): TypedUpdateStart<RecordOf<TSchema>, InputOf<TSchema>> {
         return {
-            with: (document) => this.updateChain(query.with(this.table.schema.partial().parse(document))),
-            set: (attribute) => ({eq: (value) => this.updateChain(query.set(attribute).eq(this.table.parseField(attribute, value)))}),
+            with: (document) => this.updateChain(query.with(this.table.parseUpdate(document))),
+            set: (attribute) => ({eq: (value) => this.updateChain(query.set(attribute).eq(this.table.parseUpdateField(attribute, value)))}),
             remove: (attribute) => {
                 this.table.assertField(attribute);
                 return this.updateChain(query.remove(attribute));
@@ -825,7 +871,7 @@ export class TypedTableQuery<
             returningNone: () => this.updateChain<void>(query.returningNone()),
             returnCapacity: (mode) => this.updateChain<TResult>(query.returnCapacity(mode)),
             returnItemCollectionMetrics: () => this.updateChain<TResult>(query.returnItemCollectionMetrics()),
-            set: (attribute) => ({eq: (value) => this.updateChain<TResult>(query.set(attribute).eq(this.table.parseField(attribute, value)))}),
+            set: (attribute) => ({eq: (value) => this.updateChain<TResult>(query.set(attribute).eq(this.table.parseUpdateField(attribute, value)))}),
             remove: (attribute) => {
                 this.table.assertField(attribute);
                 return this.updateChain<TResult>(query.remove(attribute));
@@ -846,8 +892,12 @@ export class TypedTableQuery<
         };
     }
 
-    private filterComparison<TValue, TNext>(query: any, key: string, next: (query: any) => TNext): TypedFilterComparison<TValue, TNext> {
+    private filterComparison<TValue, TNext>(query: any, key: string, next: (query: any) => TNext,
+        definition: KeyDefinition<RecordOf<TSchema>> | null = null): TypedFilterComparison<TValue, TNext> {
         this.table.assertField(key);
+        if (definition !== null && (key === definition.partition || key === definition.sort)) {
+            throw new Error('Query filters cannot reference active key attributes; use key conditions');
+        }
         return {
             ...this.comparison<TValue, TNext>(query, key, next),
             not: () => this.comparison<TValue, TNext>(query.not(), key, next)

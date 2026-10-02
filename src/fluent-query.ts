@@ -6,7 +6,7 @@ export interface ComparisonQuery<TResult> {
     /** Matches an exact value. */
     eq(value: any): TResult;
     /** Matches values different from the supplied value. */
-    ne(value: ComparisonValue): TResult;
+    ne(value: unknown): TResult;
     /** Matches values greater than the supplied value. */
     gt(value: ComparisonValue): TResult;
     /** Matches values greater than or equal to the supplied value. */
@@ -16,9 +16,9 @@ export interface ComparisonQuery<TResult> {
     /** Matches values less than or equal to the supplied value. */
     lte(value: ComparisonValue): TResult;
     /** Matches strings or collections containing the supplied value. */
-    contains(value: ComparisonValue): TResult;
+    contains(value: unknown): TResult;
     /** Matches values equal to one of the supplied values. */
-    in(value: ComparisonValue[]): TResult;
+    in(value: unknown[]): TResult;
 }
 
 /** Adds a negation entry point to comparison methods. */
@@ -40,7 +40,7 @@ export interface NotConditionalQuery<TResult> extends ConditionalQuery<TResult> 
 }
 
 type ComparisonHandler = (operator: ComparisonOperator, value: unknown, negated: boolean) => void;
-type InHandler = (values: ComparisonValue[], negated: boolean) => void;
+type InHandler = (values: unknown[], negated: boolean) => void;
 
 function createComparisons<TResult>(
     next: () => TResult,
@@ -55,13 +55,13 @@ function createComparisons<TResult>(
 
     return {
         eq: (value: any): TResult => apply('=', value, negated),
-        ne: (value: ComparisonValue): TResult => apply('<>', value, negated),
+        ne: (value: unknown): TResult => apply('<>', value, negated),
         gt: (value: ComparisonValue): TResult => apply('>', value, negated),
         gte: (value: ComparisonValue): TResult => apply('>=', value, negated),
         lt: (value: ComparisonValue): TResult => apply('<', value, negated),
         lte: (value: ComparisonValue): TResult => apply('<=', value, negated),
-        contains: (value: ComparisonValue): TResult => apply('contains', value, negated),
-        in: (values: ComparisonValue[]): TResult => {
+        contains: (value: unknown): TResult => apply('contains', value, negated),
+        in: (values: unknown[]): TResult => {
             addInComparison(values, negated);
             return next();
         }

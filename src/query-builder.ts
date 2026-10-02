@@ -18,6 +18,7 @@ import {UpdateExpressionType} from "./types";
 import type {ConditionalWriteResult} from "./types";
 import type {AddSubQuery, BatchGetOptions, BatchOptions, BatchWriteOptions, ConditionCheckNotWhereQuery, ConditionCheckQuery, ConditionFailureReturnOptions, CountFinal, CreateDocumentWith, CreateNotWhereQuery, CreateQuery, DeleteDocumentWith, DeleteNotWhereQuery, DeleteQuery, DynamoResponse, Final, GenericDocument, GetDocumentSelector, GetDocumentWith, GetSelector, IndexKind, PageOptions, Query, QueryCursor, QueryDocument, QueryPage, QueryScanWhereSubQuery, ReturnConsumedCapacity, Scan, SetSubQuery, SubQuery, UpdateDocumentSelector, UpdateDocumentWith, UpdateEqQuery, UpdateNotWhereQuery, UpdateQuery, UpdateSubQuery, UpdateWithQuery} from "./types";
 import {ValueUtils} from "./value-utils";
+import {assertDynamoKeyValue, compareDynamoValues} from "./dynamodb-values";
 
 let requestId = '0';
 
@@ -36,6 +37,8 @@ export class QueryBuilder {
     private _executionMode: 'all' | 'page' | 'iterator' | null = null;
     private _projection: string[] | null = null;
     private _count = false;
+    private queryKeys = new Set<string>();
+    private sortKeyAdded = false;
 
     /** Creates a builder for one table and optionally supplies a result parser. */
     constructor(
@@ -303,8 +306,9 @@ export class QueryBuilder {
             ExpressionAttributeNames?: Record<string, string>;
         };
         if (unique !== undefined) {
-            request.ProjectionExpression = unique.map((attribute) => `#${attribute}`).join(', ');
-            request.ExpressionAttributeNames = Object.fromEntries(unique.map((attribute) => [`#${attribute}`, attribute]));
+            const expressions = new ExpressionBuilder();
+            request.ProjectionExpression = unique.map((attribute) => expressions.addName(attribute)).join(', ');
+            expressions.applyTo(request);
         }
         this.request.startBatchGet({[this.tableName]: request});
 
@@ -512,13 +516,16 @@ export class QueryBuilder {
     public query(doc: QueryDocument): Query {
         this.request.startQuery(this.tableName, false);
 
-        for (const key in doc) {
-            if (doc.hasOwnProperty(key)) {
-                this.addKeyConditionExpression(key, '=');
-                this.addExpressionAttributeName(key);
-                this.addExpressionAttributeValue(key, doc[key]);
-            }
+        const keys = Object.keys(doc);
+        if (keys.length < 1 || keys.length > 2) {
+            throw new Error('Query requires one partition key and at most one sort key');
         }
+        for (const key of keys) {
+            assertDynamoKeyValue(doc[key]);
+            this.expressions.addKeyCondition(key, '=', doc[key]);
+            this.queryKeys.add(key);
+        }
+        this.sortKeyAdded = keys.length === 2;
 
         return {
             limit: this.queryLimit.bind(this),
@@ -547,17 +554,37 @@ export class QueryBuilder {
             lt: (value: string | number | Binary) => this.addQuerySortKey(attribute, '<', value),
             lte: (value: string | number | Binary) => this.addQuerySortKey(attribute, '<=', value),
             between: (lower: string | number | Binary, upper: string | number | Binary) => {
+                assertDynamoKeyValue(lower, true);
+                assertDynamoKeyValue(upper, true);
+                const order = compareDynamoValues(lower, upper);
+                if (order === null || order > 0) throw new Error('Sort-key range requires matching types and ordered bounds');
+                this.registerSortKey(attribute);
                 this.expressions.addKeyBetween(attribute, lower, upper);
                 return this.queryResult();
             },
             beginsWith: (value: string | Binary) => {
+                if (typeof value !== 'string' && !(value instanceof Uint8Array)) {
+                    throw new Error('Sort-key prefix requires a string or binary value');
+                }
+                assertDynamoKeyValue(value, true);
+                this.registerSortKey(attribute);
                 this.expressions.addKeyBeginsWith(attribute, value);
                 return this.queryResult();
             }
         };
     }
 
+    private registerSortKey(attribute: string): void {
+        if (this.sortKeyAdded || this.queryKeys.has(attribute)) {
+            throw new Error('Query supports at most one sort-key predicate, separate from the partition key');
+        }
+        this.sortKeyAdded = true;
+        this.queryKeys.add(attribute);
+    }
+
     private addQuerySortKey(attribute: string, operator: string, value: string | number | Binary): Query {
+        assertDynamoKeyValue(value, true);
+        this.registerSortKey(attribute);
         this.expressions.addKeyComparison(attribute, operator, value);
         return this.queryResult();
     }
@@ -594,15 +621,11 @@ export class QueryBuilder {
         this.expressions.addName(name);
     }
 
-    private addKeyConditionExpression(name: string, expression: string): void {
-        this.expressions.addKeyCondition(name, expression);
-    }
-
     private addWhereExpression(whereKey: string, operator: string, val: any, isNot: boolean, filter: boolean): void {
         this.expressions.addComparison(whereKey, operator, val, isNot, filter);
     }
 
-    private addWhereInExpression(whereKey: string, val: (string | number | Binary)[], isNot: boolean, filter: boolean): void {
+    private addWhereInExpression(whereKey: string, val: unknown[], isNot: boolean, filter: boolean): void {
         this.expressions.addInComparison(whereKey, val, isNot, filter);
     }
 
@@ -843,9 +866,9 @@ export class QueryBuilder {
         if (unique.length === 0 || unique.some((attribute) => typeof attribute !== 'string' || attribute.length === 0)) {
             throw new Error('Projection requires at least one attribute');
         }
-        unique.forEach((attribute) => this.addExpressionAttributeName(attribute));
+        const aliases = unique.map((attribute) => this.expressions.addName(attribute));
         this._projection = unique;
-        this.request.setProjection(unique);
+        this.request.setProjection(aliases);
     }
 
     private count(): CountFinal {

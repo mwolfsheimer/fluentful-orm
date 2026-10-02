@@ -6,6 +6,8 @@ import type {GenericDocument, GetSelector} from "./types";
 export interface ExpressionTarget {
     /** Compiled update expression. */
     UpdateExpression?: string;
+    /** Compiled top-level projection aliases. */
+    ProjectionExpression?: string;
     /** Compiled query key-condition expression. */
     KeyConditionExpression?: string;
     /** Values referenced by expression placeholders. */
@@ -29,6 +31,8 @@ export class ExpressionBuilder {
     private attributeValues: GenericDocument<GetSelector> = {};
     private attributeNames: GenericDocument<string> = {};
     private updateValueKeys = new Map<string, string>();
+    private nameKeys = new Map<string, string>();
+    private nameId = 0;
 
     /** Adds an update action for an attribute. */
     addUpdate(type: UpdateExpressionType, name: string): void {
@@ -40,7 +44,7 @@ export class ExpressionBuilder {
         let valueKey = this.updateValueKeys.get(attribute);
 
         if (valueKey === undefined) {
-            valueKey = attribute;
+            valueKey = /^[A-Za-z0-9_]{1,254}$/.test(attribute) ? attribute : `update${this.updateValueId++}`;
             while (this.attributeValues[`:${valueKey}`] !== undefined) {
                 valueKey = `update${this.updateValueId++}`;
             }
@@ -58,69 +62,73 @@ export class ExpressionBuilder {
     }
 
     /** Registers an attribute name for expression substitution. */
-    addName(name: string): void {
-        if (!this.attributeNames[`#${name}`]) {
-            this.attributeNames[`#${name}`] = name;
+    addName(name: string): string {
+        if (typeof name !== 'string' || name.length === 0) throw new Error('Attribute name must not be empty');
+        let alias = this.nameKeys.get(name);
+        if (alias === undefined) {
+            alias = /^[A-Za-z0-9_]{1,254}$/.test(name) ? `#${name}` : `#name${this.nameId++}`;
+            while (this.attributeNames[alias] !== undefined) alias = `#name${this.nameId++}`;
+            this.nameKeys.set(name, alias);
+            this.attributeNames[alias] = name;
         }
+        return alias;
     }
 
     /** Adds an equality-style key condition. */
-    addKeyCondition(name: string, operator: string): void {
-        this.keyConditionExpression = this.append(this.keyConditionExpression, `#${name} ${operator} :${name}`);
+    addKeyCondition(name: string, operator: string, value: unknown): void {
+        this.addValue(name, value);
+        this.keyConditionExpression = this.append(this.keyConditionExpression,
+            `${this.addName(name)} ${operator} :${this.updateValueKeys.get(name)}`);
     }
 
     /** Adds a comparison against a query sort key. */
     addKeyComparison(name: string, operator: string, value: unknown): void {
         const valueKey = this.addUniqueValue(value);
-        this.addName(name);
-        this.keyConditionExpression = this.append(this.keyConditionExpression, `#${name} ${operator} :${valueKey}`);
+        this.keyConditionExpression = this.append(this.keyConditionExpression, `${this.addName(name)} ${operator} :${valueKey}`);
     }
 
     /** Adds an inclusive sort-key range condition. */
     addKeyBetween(name: string, lower: unknown, upper: unknown): void {
         const lowerKey = this.addUniqueValue(lower);
         const upperKey = this.addUniqueValue(upper);
-        this.addName(name);
         this.keyConditionExpression = this.append(
             this.keyConditionExpression,
-            `#${name} BETWEEN :${lowerKey} AND :${upperKey}`
+            `${this.addName(name)} BETWEEN :${lowerKey} AND :${upperKey}`
         );
     }
 
     /** Adds a string or binary sort-key prefix condition. */
     addKeyBeginsWith(name: string, value: unknown): void {
         const valueKey = this.addUniqueValue(value);
-        this.addName(name);
-        this.keyConditionExpression = this.append(this.keyConditionExpression, `begins_with(#${name}, :${valueKey})`);
+        this.keyConditionExpression = this.append(this.keyConditionExpression, `begins_with(${this.addName(name)}, :${valueKey})`);
     }
 
     /** Adds an attribute-existence condition. */
     addExistsCondition(name: string, exists: boolean): void {
-        this.addName(name);
-        this.addCondition(`${exists ? 'attribute_exists' : 'attribute_not_exists'}(#${name})`);
+        this.addCondition(`${exists ? 'attribute_exists' : 'attribute_not_exists'}(${this.addName(name)})`);
     }
 
     /** Adds a scalar or collection comparison to a condition or filter. */
     addComparison(name: string, operator: string, value: unknown, negated: boolean, filter: boolean): void {
         const valueKey = this.addUniqueValue(value);
+        const alias = this.addName(name);
         const comparison = operator === 'contains'
-            ? `contains (#${name}, :${valueKey})`
-            : `#${name} ${operator} :${valueKey}`;
+            ? `contains (${alias}, :${valueKey})`
+            : `${alias} ${operator} :${valueKey}`;
 
-        this.addName(name);
         this.addExpression((negated ? 'NOT (' : '') + comparison + (negated ? ')' : ''), filter);
     }
 
     /** Adds an `IN` comparison to a condition or filter. */
-    addInComparison(name: string, values: (string | number | Uint8Array)[], negated: boolean, filter: boolean): void {
+    addInComparison(name: string, values: unknown[], negated: boolean, filter: boolean): void {
         if (values.length === 0) {
             throw new Error(`IN comparison on ${name} requires at least one value`);
         }
 
+        if (values.length > 100) throw new Error(`IN comparison on ${name} supports at most 100 values`);
         const valueKeys = values.map((value) => `:${this.addUniqueValue(value)}`);
-        const comparison = `#${name} IN (${valueKeys.join(', ')})`;
+        const comparison = `${this.addName(name)} IN (${valueKeys.join(', ')})`;
 
-        this.addName(name);
         this.addExpression((negated ? 'NOT (' : '') + comparison + (negated ? ')' : ''), filter);
     }
 
@@ -130,8 +138,14 @@ export class ExpressionBuilder {
         this.assignOrDelete(target, 'KeyConditionExpression', this.keyConditionExpression);
         this.assignOrDelete(target, 'ConditionExpression', this.conditionExpression);
         this.assignOrDelete(target, 'FilterExpression', this.filterExpression);
-        this.assignOrDelete(target, 'ExpressionAttributeValues', Object.keys(this.attributeValues).length ? this.attributeValues : undefined);
-        this.assignOrDelete(target, 'ExpressionAttributeNames', Object.keys(this.attributeNames).length ? this.attributeNames : undefined);
+        const expressions = [target.UpdateExpression, target.KeyConditionExpression, target.ConditionExpression,
+            target.FilterExpression, target.ProjectionExpression].filter(Boolean).join(' ');
+        const valueAliases = new Set<string>(expressions.match(/:[A-Za-z0-9_]+/g) || []);
+        const nameAliases = new Set<string>(expressions.match(/#[A-Za-z0-9_]+/g) || []);
+        const values = Object.fromEntries(Object.entries(this.attributeValues).filter(([alias]) => valueAliases.has(alias)));
+        const names = Object.fromEntries(Object.entries(this.attributeNames).filter(([alias]) => nameAliases.has(alias)));
+        this.assignOrDelete(target, 'ExpressionAttributeValues', Object.keys(values).length ? values : undefined);
+        this.assignOrDelete(target, 'ExpressionAttributeNames', Object.keys(names).length ? names : undefined);
     }
 
     private addUniqueValue(value: unknown): string {
@@ -182,11 +196,12 @@ export class ExpressionBuilder {
                 delete this.attributeValues[`:${valueKey}`];
             }
 
+            const alias = this.addName(name);
             const clause = type === UpdateExpressionType.SET
-                ? `#${name} = :${valueKey}`
+                ? `${alias} = :${valueKey}`
                 : type === UpdateExpressionType.REMOVE
-                    ? `#${name}`
-                    : `#${name} :${valueKey}`;
+                    ? alias
+                    : `${alias} :${valueKey}`;
             const group = groups.get(type);
 
             if (group) {

@@ -531,6 +531,114 @@ describe('query - TypedTable', () => {
         assert.equal(fake.inputs.length, 0);
     });
 
+    test('validates partial operands through collection wrappers without container constraints', async () => {
+        const fake = createFakeDynamoDB(() => ({Items: []}));
+        const member = z.string().min(2).transform((value) => value.toUpperCase());
+        const records = defineTable({
+            name: 'operands',
+            schema: z.object({
+                id: z.string(),
+                sort: z.string().regex(/^ITEM#\\d+$/),
+                text: z.string().min(5).regex(/^full/),
+                list: z.array(member).min(2).max(3).readonly().nullable().optional(),
+                set: z.set(member).min(2).readonly().default(new Set(['AA', 'BB'])),
+                caught: z.array(member).min(2).catch(['AA', 'BB']),
+                piped: z.array(member).pipe(z.array(z.string()).min(2)),
+                union: z.union([z.array(member).min(2), z.set(member).min(2)]),
+                prefault: z.array(member).min(2).prefault(['AA', 'BB']).nonoptional()
+            }),
+            key: {partition: 'id', sort: 'sort'}
+        }).using(fake.db);
+        for (const field of ['list', 'set', 'caught', 'piped', 'union', 'prefault'] as const) {
+            await records.scan().where(field).contains('ab').toPromise();
+            assert.deepEqual(fake.inputs.at(-1).ExpressionAttributeValues[':condition0'], {S: 'AB'});
+            assert.throws(() => records.scan().where(field).contains('a'), z.ZodError);
+        }
+        assert.doesNotThrow(() => records.scan().where('text').contains('u'));
+        assert.throws(() => records.scan().where('text').eq('u'), z.ZodError);
+        assert.throws(() => records.scan().where('list').eq(['ab']), z.ZodError);
+        assert.doesNotThrow(() => records.query({id: 'p'}).sortKey().beginsWith('ITEM#'));
+        assert.throws(() => records.query({id: 'p'}).sortKey().eq('ITEM#'), z.ZodError);
+        assert.throws(() => records.query({id: 'p'}).sortKey().beginsWith(1 as any), z.ZodError);
+        if (false) {
+            // @ts-expect-error Readonly sets still use their member type.
+            records.scan().where('set').contains(1);
+            // @ts-expect-error Readonly arrays still use their member type.
+            records.scan().where('list').contains(1);
+            // @ts-expect-error Prefixes require strings for string keys.
+            records.query({id: 'p'}).sortKey().beginsWith(1);
+        }
+    });
+
+    test('rejects active query-key filters and preserves index metadata through continuations', () => {
+        const fake = createFakeDynamoDB();
+        const records = defineTable({
+            name: 'active-keys',
+            schema: z.object({id: z.string(), sort: z.number(), category: z.string(), rank: z.number(), text: z.string()}),
+            key: {partition: 'id', sort: 'sort'},
+            indexes: {category: {kind: 'global', partition: 'category', sort: 'rank'}}
+        }).using(fake.db);
+        assert.throws(() => records.query({id: 'p'}).where('id'), /active key/);
+        assert.throws(() => records.query({id: 'p'}).where('sort'), /active key/);
+        assert.throws(() => records.query({id: 'p'}).where('text').eq('x').where('id'), /active key/);
+        assert.throws(() => records.index('category').query({category: 'c'}).descending().select('id', 'rank').where('rank'), /active key/);
+        assert.throws(() => records.index('category').query({category: 'c'}).sortKey().gte(1).where('category'), /active key/);
+        assert.doesNotThrow(() => records.index('category').query({category: 'c'}).where('id').eq('p').where('sort').eq(1));
+        assert.doesNotThrow(() => records.scan().where('id').eq('p'));
+        assert.equal(fake.inputs.length, 0);
+    });
+
+    test('validates declared key sizes and present index keys on all typed write paths', async () => {
+        const fake = createFakeDynamoDB();
+        const table = defineTable({
+            name: 'typed-key-writes',
+            schema: z.object({id: z.string(), sort: z.string(), category: z.string(), rank: z.number(), text: z.string()}),
+            key: {partition: 'id', sort: 'sort'},
+            indexes: {category: {kind: 'global', partition: 'category', sort: 'rank'}}
+        });
+        const records = table.using(fake.db);
+        const key = {id: 'p', sort: 's'};
+        const document = {...key, category: 'valid', rank: 1, text: 'text'};
+        for (const category of ['', '\u{10000}'.repeat(513)]) {
+            assert.throws(() => records.create({...document, category}), /DynamoDB key/);
+            assert.throws(() => records.update(key).set('category').eq(category), /DynamoDB key/);
+            assert.throws(() => records.update(key).with({category}), /DynamoDB key/);
+            await assert.rejects(records.createBatch([{...document, category}]), /DynamoDB key/);
+            assert.throws(() => typedTransaction(fake.db).add(table, (query) => query.create({...document, category})), /DynamoDB key/);
+        }
+        assert.throws(() => records.get({id: '', sort: 's'}), /DynamoDB key/);
+        assert.throws(() => records.get({id: 'p', sort: '\u{10000}'.repeat(257)}), /DynamoDB key/);
+        assert.throws(() => records.create({...document, rank: 1e126}), /DynamoDB key/);
+        assert.doesNotThrow(() => records.get({id: '\u{10000}'.repeat(512), sort: '\u{10000}'.repeat(256)}));
+        assert.equal(fake.inputs.length, 0);
+    });
+
+    test('accepts partial literal/enum strings without relaxing complete equality', () => {
+        const fake = createFakeDynamoDB();
+        const records = defineTable({
+            name: 'literal-operands',
+            schema: z.object({id: z.string(), sort: z.literal('ITEM#1'), status: z.enum(['full-one', 'full-two'])}),
+            key: {partition: 'id', sort: 'sort'}
+        }).using(fake.db);
+        assert.doesNotThrow(() => records.query({id: 'p'}).sortKey().beginsWith('ITEM#'));
+        assert.doesNotThrow(() => records.scan().where('status').contains('one'));
+        assert.throws(() => records.scan().where('status').eq('one' as any), z.ZodError);
+    });
+
+    test('validates binary prefix types without applying complete-key refinements', () => {
+        const fake = createFakeDynamoDB();
+        const records = defineTable({
+            name: 'binary-prefix',
+            schema: z.object({id: z.string(), sort: z.instanceof(Uint8Array).refine((bytes) => bytes.length === 8)}),
+            key: {partition: 'id', sort: 'sort'}
+        }).using(fake.db);
+        assert.doesNotThrow(() => records.query({id: 'p'}).sortKey().beginsWith(new Uint8Array([1])));
+        assert.throws(() => records.query({id: 'p'}).sortKey().eq(new Uint8Array([1])), z.ZodError);
+        assert.throws(() => records.query({id: 'p'}).sortKey().beginsWith('wrong' as any), z.ZodError);
+        assert.throws(() => records.query({id: 'p'}).sortKey().beginsWith(new Uint8Array()), /DynamoDB key/);
+        assert.equal(fake.inputs.length, 0);
+    });
+
     test('validates contains values against Set and array element schemas', () => {
         const fake = createFakeDynamoDB();
         const records = createTestTable().using(fake.db);

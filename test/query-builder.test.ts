@@ -6,6 +6,66 @@ import {QuerySerializer} from '../src/query-serializer';
 import {createFakeDynamoDB} from './fake-dynamodb';
 import {z} from 'zod';
 
+test('allocates safe collision-free aliases for literal attribute names in every expression', async () => {
+    const fake = createFakeDynamoDB(() => ({Items: [], Attributes: {id: {S: 'one'}}, Responses: {test: []}}));
+    const fields = ['odd.name', 'odd-name', 'space name', 'caf\u00e9', '1start', 'name0', 'update0', 'condition0'];
+    await new QueryBuilder('test', fake.db).query({'odd.name': 'partition'})
+        .sortKey('odd-name').between(1, 2).select(...fields).where('space name').not().in([{a: [1]}, null]).toPromise();
+    await new QueryBuilder('test', fake.db).update({id: 'one'}).with(Object.fromEntries(fields.map((field) => [field, 1])))
+        .where('odd.name').exists().where('odd-name').contains('part').remove('space name').toPromise();
+    await new QueryBuilder('test', fake.db).get({id: 'one'}).select(...fields).select('odd.name').toPromise();
+    await new QueryBuilder('test', fake.db).getBatch([{id: 'one'}], {select: fields});
+    await new QueryBuilder('test', fake.db).query({'odd-name': 'p'}).sortKey('odd.name').beginsWith('prefix').toPromise();
+    for (const input of [...fake.inputs.slice(0, 3), fake.inputs[3].RequestItems.test, fake.inputs[4]]) {
+        const expressions = [input.KeyConditionExpression, input.ConditionExpression, input.FilterExpression,
+            input.UpdateExpression, input.ProjectionExpression].filter(Boolean).join(' ');
+        for (const [alias, name] of Object.entries(input.ExpressionAttributeNames)) {
+            assert.match(alias, /^#[A-Za-z0-9_]+$/);
+            assert.ok(fields.includes(name as string));
+            assert.ok(new Set<string>(expressions.match(/#[A-Za-z0-9_]+/g) || []).has(alias));
+        }
+        for (const alias of Object.keys(input.ExpressionAttributeValues || {})) {
+            assert.match(alias, /^:[A-Za-z0-9_]+$/);
+            assert.ok(new Set<string>(expressions.match(/:[A-Za-z0-9_]+/g) || []).has(alias));
+        }
+    }
+    assert.equal(Object.keys(fake.inputs[2].ExpressionAttributeNames).length, 1);
+    assert.equal(Object.values(fake.inputs[0].ExpressionAttributeNames).filter((name) => name === 'odd.name').length, 1);
+});
+
+test('enforces IN, query-key, segment and index-selection boundaries before sending', async () => {
+    const fake = createFakeDynamoDB(() => ({Items: []}));
+    for (const count of [1, 100]) {
+        for (const negated of [false, true]) {
+            const comparison = new QueryBuilder('test', fake.db).scan().where('value');
+            await (negated ? comparison.not() : comparison).in(Array.from({length: count}, (_, i) => i)).toPromise();
+        }
+    }
+    for (const negated of [false, true]) {
+        const comparison = new QueryBuilder('test', fake.db).scan().where('value');
+        assert.throws(() => (negated ? comparison.not() : comparison).in(Array(101).fill(1)), /at most 100/);
+    }
+    for (const value of ['', new Uint8Array(), null, [], false, Infinity, 1e126, 1e-131, 'x'.repeat(2049)]) {
+        assert.throws(() => new QueryBuilder('test', fake.db).query({id: value as any}), /key/);
+    }
+    assert.throws(() => new QueryBuilder('test', fake.db).query({}), /partition key/);
+    assert.throws(() => new QueryBuilder('test', fake.db).query({id: 'p'}).sortKey('id').eq('p'), /sort-key predicate/);
+    assert.throws(() => new QueryBuilder('test', fake.db).query({id: 'p'}).sortKey('sort').gt(1).sortKey('sort').lt(3), /sort-key predicate/);
+    assert.throws(() => new QueryBuilder('test', fake.db).query({id: 'p', sort: 1}).sortKey('sort').eq(1), /sort-key predicate/);
+    assert.throws(() => new QueryBuilder('test', fake.db).query({id: 'p'}).sortKey('sort').beginsWith(1 as any), /prefix/);
+    assert.throws(() => new QueryBuilder('test', fake.db).query({id: 'p'}).sortKey('sort').between(3, 1), /ordered bounds/);
+    assert.throws(() => new QueryBuilder('test', fake.db).query({id: 'p'}).sortKey('sort').between(1, '2'), /matching types/);
+    assert.throws(() => new QueryBuilder('test', fake.db).scan().parallel(0, 1000001), /segment/);
+    assert.doesNotThrow(() => new QueryBuilder('test', fake.db).scan().parallel(999999, 1000000));
+    assert.throws(() => new QueryBuilder('test', fake.db).usingIndex('index'), /query operation/);
+    assert.throws(() => new QueryBuilder('test', fake.db).get({id: 'p'}).usingIndex('index'), /query operation/);
+    const scan = new QueryBuilder('test', fake.db);
+    scan.scan();
+    assert.throws(() => scan.usingIndex('index'), /index scans/);
+    assert.throws(() => new QueryBuilder('test', fake.db).query({id: 'p'}).usingIndex(''), /requires a name/);
+    assert.equal(fake.inputs.length, 4);
+});
+
 test('configures fluent DynamoDB request options and returns response metadata', async () => {
     const capacity = {TableName: 'test', CapacityUnits: 2};
     const metrics = {ItemCollectionKey: QuerySerializer.serialiseMap({id: 'item'}), SizeEstimateRangeGB: [0.01, 0.02]};

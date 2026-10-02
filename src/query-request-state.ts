@@ -126,7 +126,13 @@ export class QueryRequestState {
 
     /** Selects a secondary index and validates global-index consistency rules. */
     setIndex(indexName: string, kind: IndexKind): void {
-        if (this.operation !== null && this.operation.kind === 'query') {
+        if (this.operation === null || this.operation.kind !== 'query') {
+            throw new Error('Index selection requires a query operation; index scans are not supported');
+        }
+        if (typeof indexName !== 'string' || indexName.length === 0 || !['global', 'local'].includes(kind)) {
+            throw new Error('Index selection requires a name and a global or local kind');
+        }
+        if (this.operation.kind === 'query') {
             if (kind === 'global' && this.operation.input.ConsistentRead === true) {
                 throw new Error(`Global secondary index ${indexName} does not support consistent reads`);
             }
@@ -159,7 +165,7 @@ export class QueryRequestState {
         if (this.operation === null || this.operation.kind !== 'scan') {
             throw new Error('Parallel scans require a scan operation');
         }
-        if (!Number.isInteger(totalSegments) || totalSegments < 1 || !Number.isInteger(segment) || segment < 0 || segment >= totalSegments) {
+        if (!Number.isInteger(totalSegments) || totalSegments < 1 || totalSegments > 1000000 || !Number.isInteger(segment) || segment < 0 || segment >= totalSegments) {
             throw new Error('Parallel scan segment must be a non-negative integer less than totalSegments');
         }
         this.operation.input.Segment = segment;
@@ -176,7 +182,7 @@ export class QueryRequestState {
     /** Sets the projected attributes for a query or scan. */
     setProjection(attributes: string[]): void {
         if (this.operation !== null && (this.operation.kind === 'query' || this.operation.kind === 'scan' || this.operation.kind === 'getItem')) {
-            this.operation.input.ProjectionExpression = attributes.map((attribute) => `#${attribute}`).join(', ');
+            this.operation.input.ProjectionExpression = attributes.join(', ');
         }
     }
 

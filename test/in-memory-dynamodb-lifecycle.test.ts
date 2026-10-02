@@ -6,6 +6,7 @@ import {
     PutItemCommand,
     QueryCommand,
     ResourceNotFoundException,
+    ScanCommand,
     UpdateTimeToLiveCommand
 } from '@aws-sdk/client-dynamodb';
 import {QuerySerializer} from '../src/query-serializer';
@@ -20,6 +21,64 @@ function fixture(context: TestContext) {
     context.after(() => backend.close());
     return {backend, query: () => new QueryBuilder('records', backend.db)};
 }
+
+test('validates raw query predicates and operands even when no records match', async (context) => {
+    const backend = createEngine.memory([{
+        name: 'key-rules', key: {partition: 'id', sort: 'sort'}, attributes: {id: 'S', sort: 'N'}, indexes: {}
+    }]);
+    context.after(() => backend.close());
+    const names = {'#id': 'id', '#same': 'id', '#sort': 'sort', '#other': 'other'};
+    const valid = {':id': {S: 'p'}, ':a': {N: '1'}, ':b': {N: '2'}};
+    for (const populated of [false, true]) {
+        if (populated) await new QueryBuilder('key-rules', backend.db).create({id: 'p', sort: 1}).toPromise();
+        for (const expression of [
+            '#id > :id', '#sort = :a', '#id = :id AND #same = :id',
+            '#id = :id AND #sort > :a AND #sort < :b', '#id = :id AND #other = :a',
+            '#id = :id AND begins_with(#sort, :a)', '#id = :id AND #sort BETWEEN :b AND :a'
+        ]) {
+            await assert.rejects(backend.db.send(new QueryCommand({
+                TableName: 'key-rules', KeyConditionExpression: expression,
+                ExpressionAttributeNames: names, ExpressionAttributeValues: valid
+            })), (error: any) => error.name === 'ValidationException');
+        }
+        for (const operand of [{S: ''}, {N: '1'}, {NULL: true}, {B: new Uint8Array()}, {S: 'x'.repeat(2049)}]) {
+            await assert.rejects(backend.db.send(new QueryCommand({
+                TableName: 'key-rules', KeyConditionExpression: '#id = :id',
+                ExpressionAttributeNames: {'#id': 'id'}, ExpressionAttributeValues: {':id': operand}
+            })), (error: any) => error.name === 'ValidationException');
+        }
+        await assert.rejects(backend.db.send(new QueryCommand({
+            TableName: 'key-rules', KeyConditionExpression: '#id = :id AND #sort = :a',
+            ExpressionAttributeNames: names, ExpressionAttributeValues: {...valid, ':a': {S: 'wrong'}}
+        })), /Invalid key attribute/);
+    }
+});
+
+test('validates raw IN cardinality, alias syntax and parallel scan boundaries', async (context) => {
+    const {backend} = fixture(context);
+    for (const count of [1, 100, 101]) {
+        for (const negate of [false, true]) {
+            const aliases = Array.from({length: count}, (_, index) => `:v${index}`);
+            const expression = `#value IN (${aliases.join(', ')})`;
+            const run = () => backend.db.send(new ScanCommand({
+                TableName: 'records', FilterExpression: negate ? `NOT (${expression})` : expression,
+                ExpressionAttributeNames: {'#value': 'value'},
+                ExpressionAttributeValues: Object.fromEntries(aliases.map((alias) => [alias, {N: '1'}]))
+            }));
+            if (count > 100) await assert.rejects(run(), /at most 100/);
+            else await run();
+        }
+    }
+    await assert.rejects(backend.db.send(new ScanCommand({
+        TableName: 'records', FilterExpression: '#value IN ()', ExpressionAttributeNames: {'#value': 'value'}
+    })), /expression operand/);
+    await assert.rejects(backend.db.send(new ScanCommand({
+        TableName: 'records', FilterExpression: '#odd.name = :value',
+        ExpressionAttributeNames: {'#odd.name': 'odd.name'}, ExpressionAttributeValues: {':value': {N: '1'}}
+    })), /expression/);
+    await assert.rejects(backend.db.send(new ScanCommand({TableName: 'records', Segment: 0, TotalSegments: 1000001})), /segment/);
+    await backend.db.send(new ScanCommand({TableName: 'records', Segment: 999999, TotalSegments: 1000000}));
+});
 
 test('isolates instances, resets records and tokens, and closes idempotently', async (context) => {
     const first = fixture(context);
