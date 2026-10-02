@@ -1,3 +1,5 @@
+import {pathSegments} from './document-path';
+import type {AttributePath} from './document-path';
 import {
     BatchGetItemCommand,
     BatchWriteItemCommand,
@@ -18,7 +20,7 @@ import type {DynamoResponse, GenericDocument, QueryCursor, QueryPage} from "./ty
 import {ValueUtils} from './value-utils';
 
 type QueryLogger = null | ((message: any) => void);
-type DocumentParser = null | ((document: unknown, projection?: readonly string[] | null) => GenericDocument<any>);
+type DocumentParser = null | ((document: unknown, projection?: readonly AttributePath[] | null) => GenericDocument<any>);
 type ExecutionResult<T> = T | GenericDocument<any> | GenericDocument<any>[] | null | undefined;
 type BatchRequestItems = NonNullable<BatchGetItemCommandInput['RequestItems']> | NonNullable<BatchWriteItemCommandInput['RequestItems']>;
 type LastEvaluatedKey = Record<string, AttributeValue>;
@@ -40,7 +42,7 @@ export class QueryExecutor {
         private logger: QueryLogger,
         private requestId: string,
         private documentParser: DocumentParser,
-        private projection: readonly string[] | null = null
+        private projection: readonly AttributePath[] | null = null
     ) {}
 
     /** Executes the operation, following query/scan pages and retrying unprocessed batches. */
@@ -339,9 +341,9 @@ export class QueryExecutor {
         const parsed = QuerySerializer.parseItem(item);
         const projected = this.projection === null
             ? parsed
-            : Object.fromEntries(this.projection
-                .filter((attribute) => Object.prototype.hasOwnProperty.call(parsed, attribute))
-                .map((attribute) => [attribute, parsed[attribute]]));
+            : Object.fromEntries([...new Set(this.projection.map(attribute => pathSegments(attribute)[0] as string))]
+                .filter(attribute => Object.prototype.hasOwnProperty.call(parsed, attribute))
+                .map(attribute => [attribute, parsed[attribute]]));
         return this.documentParser === null ? projected : this.documentParser(projected, this.projection);
     }
 }

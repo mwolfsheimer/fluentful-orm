@@ -1,6 +1,10 @@
 import {QuerySerializer} from "./query-serializer";
 import {UpdateExpressionType} from "./types";
 import type {GenericDocument, GetSelector} from "./types";
+import {isAttributeReference, path, pathSegments, pathKey, pathsOverlap} from './document-path';
+import type {AttributePath} from './document-path';
+import {validatePredicate} from './predicate';
+import type {Predicate} from './predicate';
 
 /** Expression fields populated on an AWS DynamoDB request input. */
 export interface ExpressionTarget {
@@ -22,7 +26,7 @@ export interface ExpressionTarget {
 
 /** Accumulates DynamoDB expressions and placeholder values for one operation. */
 export class ExpressionBuilder {
-    private updates: {type: UpdateExpressionType, name: string}[] = [];
+    private updates: {type: UpdateExpressionType, name: AttributePath}[] = [];
     private attributeId = 0;
     private updateValueId = 0;
     private keyConditionExpression: string | undefined;
@@ -34,29 +38,56 @@ export class ExpressionBuilder {
     private nameKeys = new Map<string, string>();
     private nameId = 0;
 
+    /** Commits a complete validated predicate tree. */
+    addPredicate(predicate: Predicate, filter: boolean): void {
+        validatePredicate(predicate);
+        this.addExpression(this.compilePredicate(predicate), filter);
+    }
+
+    private compilePredicate(predicate: Predicate): string {
+        if (predicate.kind === 'group') {
+            const children = predicate.children.map(child => this.compilePredicate(child));
+            return predicate.operator === 'NOT' ? `NOT (${children.join(' AND ')})` : `(${children.join(` ${predicate.operator} `)})`;
+        }
+        const alias = this.addPath(predicate.attribute);
+        const operand = predicate.size ? `size(${alias})` : alias;
+        const values = predicate.values.map(value => isAttributeReference(value)
+            ? this.addPath(path(...value.segments)) : `:${this.addUniqueValue(value)}`);
+        const operator = predicate.operator === 'attribute_exists' && predicate.negated ? 'attribute_not_exists' : predicate.operator;
+        const expression = predicate.kind === 'function'
+            ? `${operator}${operator === 'contains' ? ' ' : ''}(${[operand, ...values].join(', ')})`
+            : predicate.kind === 'in' ? `${operand} IN (${values.join(', ')})`
+                : predicate.kind === 'between' ? `${operand} BETWEEN ${values[0]} AND ${values[1]}`
+                    : `${operand} ${predicate.operator} ${values[0]}`;
+        return predicate.negated && predicate.operator !== 'attribute_exists' ? `NOT (${expression})` : expression;
+    }
+
     /** Adds an update action for an attribute. */
-    addUpdate(type: UpdateExpressionType, name: string): void {
-        this.updates.push({type: type, name: name});
+    addUpdate(type: UpdateExpressionType, name: AttributePath): void {
+        const segments = pathSegments(name);
+        if ((type === UpdateExpressionType.ADD || type === UpdateExpressionType.DELETE) && segments.length !== 1) throw new Error('ADD and DELETE support top-level attributes only');
+        if (this.updates.some(update => pathKey(update.name) !== pathKey(name) && pathsOverlap(update.name, name))) throw new Error('Overlapping update paths');
+        this.updates.push({type, name});
     }
 
     /** Adds or replaces the value placeholder for an update attribute. */
-    addValue(attribute: string, value: unknown): void {
-        let valueKey = this.updateValueKeys.get(attribute);
+    addValue(attribute: AttributePath, value: unknown): void {
+        let valueKey = this.updateValueKeys.get(pathKey(attribute));
 
         if (valueKey === undefined) {
-            valueKey = /^[A-Za-z0-9_]{1,254}$/.test(attribute) ? attribute : `update${this.updateValueId++}`;
+            valueKey = typeof attribute === 'string' && /^[A-Za-z0-9_]{1,254}$/.test(attribute) ? attribute : `update${this.updateValueId++}`;
             while (this.attributeValues[`:${valueKey}`] !== undefined) {
                 valueKey = `update${this.updateValueId++}`;
             }
-            this.updateValueKeys.set(attribute, valueKey);
+            this.updateValueKeys.set(pathKey(attribute), valueKey);
         }
 
         this.attributeValues[`:${valueKey}`] = QuerySerializer.serialiseItem(value);
     }
 
     /** Adds an update value only when that attribute has no value yet. */
-    addValueIfAbsent(attribute: string, value: unknown): void {
-        if (!this.updateValueKeys.has(attribute)) {
+    addValueIfAbsent(attribute: AttributePath, value: unknown): void {
+        if (!this.updateValueKeys.has(pathKey(attribute))) {
             this.addValue(attribute, value);
         }
     }
@@ -74,11 +105,18 @@ export class ExpressionBuilder {
         return alias;
     }
 
+    /** Registers every map component of an explicit document path. */
+    addPath(attribute: AttributePath): string {
+        return pathSegments(attribute).map((segment, index) => typeof segment === 'number'
+            ? `[${segment}]`
+            : `${index === 0 ? '' : '.'}${this.addName(segment)}`).join('');
+    }
+
     /** Adds an equality-style key condition. */
     addKeyCondition(name: string, operator: string, value: unknown): void {
         this.addValue(name, value);
         this.keyConditionExpression = this.append(this.keyConditionExpression,
-            `${this.addName(name)} ${operator} :${this.updateValueKeys.get(name)}`);
+            `${this.addName(name)} ${operator} :${this.updateValueKeys.get(pathKey(name))}`);
     }
 
     /** Adds a comparison against a query sort key. */
@@ -181,22 +219,22 @@ export class ExpressionBuilder {
         }
 
         // The last action per attribute wins; values from losing value-bearing actions are dropped.
-        const winners = new Map<string, UpdateExpressionType>();
+        const winners = new Map<string, {type: UpdateExpressionType; name: AttributePath}>();
 
         for (const update of this.updates) {
-            winners.set(update.name, update.type);
+            winners.set(pathKey(update.name), update);
         }
 
         const groups = new Map<UpdateExpressionType, string[]>();
 
-        winners.forEach((type, name) => {
-            const valueKey = this.updateValueKeys.get(name) || name;
+        winners.forEach(({type, name}) => {
+            const valueKey = this.updateValueKeys.get(pathKey(name));
 
             if (type === UpdateExpressionType.REMOVE) {
                 delete this.attributeValues[`:${valueKey}`];
             }
 
-            const alias = this.addName(name);
+            const alias = this.addPath(name);
             const clause = type === UpdateExpressionType.SET
                 ? `${alias} = :${valueKey}`
                 : type === UpdateExpressionType.REMOVE

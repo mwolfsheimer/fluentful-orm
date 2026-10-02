@@ -43,6 +43,59 @@ import {QuerySerializer} from '../src/query-serializer';
 import {defineTable, typedTransaction} from '../src/typed-table';
 import {createFakeDynamoDB} from './fake-dynamodb';
 
+test('types and validates nested paths, references, groups and partial projected lists', async () => {
+    const schema = z.object({
+        id: z.string(), category: z.string(), used: z.number(), quota: z.number(),
+        profile: z.object({address: z.object({city: z.string(), country: z.string().default('GB')})}).readonly().optional(),
+        labels: z.array(z.object({label: z.string(), rank: z.number().default(0)})),
+        dictionary: z.record(z.string(), z.object({enabled: z.boolean()})),
+        choice: z.union([z.object({value: z.string()}), z.object({value: z.number()})]),
+        payload: z.object({value: z.string().optional()}).optional()
+    });
+    const table = defineTable({name: 'nested', schema, key: {partition: 'id'},
+        indexes: {category: {kind: 'global', partition: 'category', projection: {type: 'KEYS_ONLY'}}}});
+    const projected = {id: 'one', profile: {address: {city: 'London'}}, labels: [{label: 'second'}]};
+    const fake = createFakeDynamoDB(command => command.input.RequestItems ? {Responses: {nested: [QuerySerializer.serialiseMap(projected)]}}
+        : command.input.IndexName ? {Items: [QuerySerializer.serialiseMap({id: 'one', category: 'news'})]}
+            : command.input.Key ? {Item: QuerySerializer.serialiseMap(projected)} : {Items: []});
+    const records = table.using(fake.db);
+    const city = records.path('profile', 'address', 'city');
+    const label = records.path('labels', 2, 'label');
+    const result: Promise<{id: string; profile?: {address?: {city?: string}}; labels?: {label?: string}[]} | null> = records.get({id: 'one'}).select('id', city, label).toPromise();
+    assert.deepEqual(await result, projected);
+    const mixed = {labels: [{label: 'first', rank: 1}, {label: 'second'}]};
+    assert.deepEqual(table.parseProjection(mixed, [records.path('labels', 0), records.path('labels', 1, 'label')]), mixed);
+    assert.deepEqual(await records.getBatch([{id: 'one'}], {select: ['id', city, label]}), [projected]);
+    await records.scan().whereAll(group => group.where(city).beginsWith('Lon').where('used').lte(records.ref('quota'))
+        .whereNot(group => group.where('labels').size().between(-0.5, 2.5))).parallel(0, 2).toPromise();
+    assert.doesNotThrow(() => records.scan().where(records.path('dictionary', 'dynamic', 'enabled')).eq(true));
+    assert.doesNotThrow(() => records.scan().where(records.path('choice', 'value')).eq(1));
+    assert.throws(() => records.scan().where(city).eq(123 as any), z.ZodError);
+    assert.throws(() => records.scan().whereAny(group => group.where(city).eq(123 as any)), z.ZodError);
+    assert.throws(() => records.update({id: 'one'}).set('payload').eq(records.ref('quota') as any), /update assignments/);
+    assert.throws(() => records.scan().where('payload').contains(records.ref('quota') as any), /Function arguments/);
+    assert.deepEqual(await records.index('category').scan().where('category').eq('news').limit(25).toPromise(), [{id: 'one', category: 'news'}]);
+    assert.throws(() => records.index('category').scan().where('used' as any), /projected fields/);
+    assert.throws(() => records.index('category').scan().select(city as any), /projected fields/);
+    assert.throws(() => records.index('category').scan().where('category').eq(records.ref('used') as any), /projected fields/);
+    if (false) {
+        // @ts-expect-error Path segments follow the schema.
+        records.path('profile', 'missing');
+        // @ts-expect-error List dereferences require numeric positions.
+        records.path('labels', 'label');
+        // @ts-expect-error Nested SET operands follow the selected leaf type.
+        records.update({id: 'one'}).set(city).eq(3);
+        // @ts-expect-error Stored references retain their value types.
+        records.scan().where('used').eq(records.ref('category'));
+        // @ts-expect-error Group scopes are predicate-only.
+        records.scan().whereAny(group => group.scan());
+        // @ts-expect-error GSI scans cannot select non-projected fields.
+        records.index('category').scan().select(city);
+        // @ts-expect-error Size comparisons do not expose collection functions.
+        records.scan().where('labels').size().contains(2);
+    }
+});
+
 const recordSchema = z.object({
     id: z.string().min(1),
     category: z.string().min(1),

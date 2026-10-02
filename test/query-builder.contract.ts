@@ -7,6 +7,8 @@ import {QueryBuilder} from '../src/query-builder';
 import {QuerySerializer} from '../src/query-serializer';
 import type {DynamoDBTableDefinition} from '../src/query-table-admin';
 import {defineTable, typedTransaction} from '../src/typed-table';
+import {path, ref} from '../src/document-path';
+import type {PredicateCallback, PredicateScope, ExpressionAttributeType} from '../src/predicate';
 
 let suiteId = 0;
 
@@ -95,6 +97,148 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
         } finally {
             await close();
         }
+    });
+
+    test('keeps literal punctuation distinct from nested paths and preserves compact list projections', async (context) => {
+        const query = () => new QueryBuilder(tableName, dynamoDBClient);
+        const record = {id: 'nested-path-contract', 'profile.address.city': 'literal',
+            profile: {address: {city: 'London', country: 'GB'}},
+            labels: [{name: 'first', rank: 1}, {other: 'second'}, {name: 'third', rank: 3}]};
+        context.after(() => query().delete({id: record.id}).toPromise());
+        await query().create(record).toPromise();
+        const city = path('profile', 'address', 'city');
+        const read = () => query().scan().consistent().where('id').eq(record.id);
+        assert.equal((await read().where(city).eq('London').toPromise<any[]>()).length, 1);
+        assert.equal((await read().where('profile.address.city').eq('literal').toPromise<any[]>()).length, 1);
+        const selections = [city, path('labels', 2, 'name'), path('labels', 0, 'name'), path('labels', 1, 'name')];
+        const expected = {profile: {address: {city: 'London'}}, labels: [{name: 'first'}, {name: 'third'}]};
+        assert.deepEqual(await query().get({id: record.id}).consistent().select(...selections).toPromise(), expected);
+        assert.deepEqual(await query().getBatch([{id: record.id}], {consistentRead: true, select: selections}), [expected]);
+        assert.deepEqual(await read().select(...selections).toPromise(), [expected]);
+        assert.deepEqual(await query().get({id: record.id}).select(path('labels', 1, 'name')).toPromise(), {});
+        assert.deepEqual(await query().get({id: record.id}).select(path('labels', 0), path('labels', 2, 'name')).toPromise(),
+            {labels: [{name: 'first', rank: 1}, {name: 'third'}]});
+        const projected: any = await query().get({id: record.id}).select(...selections).toPromise();
+        projected.profile.address.city = 'mutated';
+        assert.deepEqual(await query().get({id: record.id}).consistent().toPromise(), record);
+        await query().update({id: record.id}).set(city).eq('Manchester').remove(path('labels', 0))
+            .remove(path('labels', 1)).set(path('labels', 2)).eq({name: 'new'}).toPromise();
+        const updated: any = await query().get({id: record.id}).consistent().toPromise();
+        assert.deepEqual(updated.labels, [{name: 'new'}]);
+        assert.equal(updated.profile.address.city, 'Manchester');
+        assert.equal(updated['profile.address.city'], 'literal');
+        await assert.rejects(query().update({id: record.id}).set(path('absent', 'child')).eq(1).toPromise(),
+            (error: any) => error.name === 'ValidationException');
+        assert.deepEqual(await query().get({id: record.id}).consistent().toPromise(), updated);
+        await query().update({id: record.id}).set('labels').eq(['a', 'b', 'c']).toPromise();
+        await query().update({id: record.id}).set(path('labels', 9)).eq('y').set('separate').eq(1)
+            .set(path('labels', 8)).eq('x').remove(path('labels', 4)).toPromise();
+        assert.deepEqual((await query().get({id: record.id}).consistent().toPromise<any>()).labels, ['a', 'b', 'c', 'x', 'y']);
+        await assert.rejects(query().update({id: record.id}).remove(path('absent', 'child')).toPromise(),
+            (error: any) => error.name === 'ValidationException');
+        assert.throws(() => query().update({id: record.id}).set('profile').eq({}).remove(city), /Overlapping/);
+        assert.throws(() => query().update({id: record.id}).set(path('id', 'child')).eq(1), /key attributes/);
+        assert.throws(() => query().update({id: record.id}).add(path('profile', 'score') as any).eq(1), /top-level/);
+        assert.throws(() => query().get({id: record.id}).select('profile', city), /Overlapping/);
+    });
+
+    test('evaluates complete functions and stored-field operands including missing values', async (context) => {
+        const query = () => new QueryBuilder(tableName, dynamoDBClient);
+        const record = {id: 'expression-functions', text: '\u00e9\ud83d\ude00', number: 3, binary: new Uint8Array([1, 2, 3]),
+            boolean: true, nil: null, otherNil: null, sameNumber: 3, map: {value: 1}, list: ['a', 'b'], strings: new Set(['a']),
+            numbers: new Set([1]), binaries: new Set([new Uint8Array([1])]), low: 1, high: 5};
+        context.after(() => query().delete({id: record.id}).toPromise());
+        await query().create(record).toPromise();
+        const read = () => query().scan().consistent().where('id').eq(record.id);
+        const types: [string, ExpressionAttributeType][] = [['text', 'S'], ['number', 'N'], ['binary', 'B'], ['boolean', 'BOOL'],
+            ['nil', 'NULL'], ['map', 'M'], ['list', 'L'], ['strings', 'SS'], ['numbers', 'NS'], ['binaries', 'BS']];
+        for (const [field, type] of types) {
+            assert.equal((await read().where(field).exists().where(field).attributeType(type).toPromise<any[]>()).length, 1);
+            assert.equal((await read().where(field).not().attributeType(type).toPromise<any[]>()).length, 0);
+        }
+        assert.equal((await read().where('missing').not().exists().where('nil').exists().toPromise<any[]>()).length, 1);
+        assert.equal((await read().where('text').size().eq(3).where('binary').size().between(2.5, 3.5)
+            .where('map').size().in([-0.5, 1]).where('list').size().gt(-0.5).toPromise<any[]>()).length, 1);
+        assert.equal((await read().where('text').beginsWith('\u00e9').where('binary').beginsWith(new Uint8Array([1, 2])).toPromise<any[]>()).length, 1);
+        for (const field of ['number', 'boolean', 'nil', 'missing']) {
+            assert.equal((await read().where(field).size().eq(1).toPromise<any[]>()).length, 0);
+            assert.equal((await read().where(field).beginsWith('x').toPromise<any[]>()).length, 0);
+        }
+        assert.equal((await read().where('number').gte(ref('low')).where('number').lte(ref('high'))
+            .where('number').between(ref('low'), ref('high')).where('number').in([ref('sameNumber'), 9]).toPromise<any[]>()).length, 1);
+        assert.throws(() => read().where('number').eq(ref('number')), /distinct/);
+        assert.throws(() => read().where('number').between(ref('number'), ref('high')), /distinct/);
+        assert.throws(() => read().where('number').in([ref('number')]), /distinct/);
+        for (const [left, right] of [['number', 'missing'], ['missing', 'number'], ['missing', 'otherMissing']]) {
+            assert.equal((await read().where(left).eq(ref(right)).toPromise<any[]>()).length, 0);
+            assert.equal((await read().where(left).ne(ref(right)).toPromise<any[]>()).length, 1);
+            assert.equal((await read().where(left).lt(ref(right)).toPromise<any[]>()).length, 0);
+        }
+        assert.equal((await read().where('nil').eq(ref('otherNil')).toPromise<any[]>()).length, 1);
+        assert.equal((await read().where('number').between(ref('missing'), ref('high')).toPromise<any[]>()).length, 0);
+        assert.equal((await read().where('missing').in([ref('otherMissing')]).toPromise<any[]>()).length, 0);
+        assert.throws(() => query().update({id: record.id}).set('number').eq(ref('high')), /update assignments/);
+        assert.throws(() => read().where('list').contains(ref('text')), /Function arguments/);
+    });
+
+    test('groups predicates atomically and keeps failed callbacks and transactions from applying changes', async (context) => {
+        const query = () => new QueryBuilder(tableName, dynamoDBClient);
+        const record = {id: 'predicate-groups', tenant: 'tenant-1', status: 'open', priority: 1, archived: false,
+            blocked: false, used: 2, quota: 5, profile: {city: 'London'}};
+        context.after(() => query().deleteBatch([{id: record.id}, {id: 'predicate-marker'}]));
+        await query().create(record).toPromise();
+        const chain = query().scan().consistent().where('id').eq(record.id).where('tenant').eq('tenant-1')
+            .whereAny(group => group.where('status').eq('open').whereAll(group => group.where('priority').gte(3).where('archived').eq(false)))
+            .whereNot(group => group.where('blocked').eq(true));
+        const invalid: PredicateCallback[] = [() => undefined, group => { group.where('status'); },
+            group => { group.where('status').eq('closed'); throw new Error('callback failure'); },
+            (async (group: PredicateScope) => { group.where('status').eq('closed'); await Promise.resolve(); group.where('priority').gt(10); }) as unknown as PredicateCallback];
+        for (const callback of invalid) assert.throws(() => chain.whereAll(callback));
+        const promise = chain.toPromise();
+        assert.equal(chain.toPromise(), promise);
+        assert.deepEqual(await promise, [record]);
+        await query().update({id: record.id}).set(path('profile', 'city')).eq('Manchester')
+            .whereAll(group => group.where('used').lt(ref('quota')).where('profile').attributeType('M'))
+            .whereNot(group => group.where('blocked').eq(true)).toPromise();
+        await query().conditionCheck({id: record.id}).whereAny(group => group.where('used').eq(2).where('status').eq('closed')).toPromise();
+        await assert.rejects(QueryBuilder.transactWrite(dynamoDBClient)
+            .add(tableName, builder => builder.update({id: record.id}).set('used').eq(3)
+                .whereAny(group => group.where('status').eq('closed').where('priority').gte(3)))
+            .add(tableName, builder => builder.create({id: 'predicate-marker'}).whereAll(group => group.where('id').not().exists()))
+            .toPromise(), TransactionCanceledException);
+        assert.equal(await query().get({id: 'predicate-marker'}).consistent().toPromise(), null);
+        assert.equal((await query().get({id: record.id}).consistent().toPromise<any>()).used, 2);
+        await query().delete({id: record.id}).whereNot(group => group.where('status').eq('closed')).toPromise();
+        await query().create(record).whereAll(group => group.where('id').not().exists()).toPromise();
+    });
+
+    test('typed nested projection parsing never invents absent fields or list positions', async (context) => {
+        const schema = z.object({id: z.string(),
+            profile: z.object({city: z.string(), country: z.string().default('GB')}).readonly().optional(),
+            labels: z.array(z.object({name: z.string(), rank: z.number().default(0)})),
+            dictionary: z.record(z.string(), z.object({active: z.boolean()})),
+            choice: z.union([z.object({value: z.string()}), z.object({value: z.number()})])});
+        const table = defineTable({name: tableName, key: {partition: 'id'}, schema});
+        const records = table.using(dynamoDBClient), id = 'typed-nested-contract';
+        context.after(() => records.delete({id}).toPromise());
+        await records.create({id, profile: {city: 'London'}, labels: [{name: 'a'}, {name: 'b'}],
+            dictionary: {entry: {active: true}}, choice: {value: 2}}).toPromise();
+        const city = records.path('profile', 'city'), label = records.path('labels', 1, 'name');
+        assert.throws(() => records.update({id}).set('profile').eq(records.ref('id') as any), /update assignments/);
+        assert.throws(() => records.scan().where('profile').contains(records.ref('id') as any), /Function arguments/);
+        const expected = {profile: {city: 'London'}, labels: [{name: 'b'}]};
+        assert.deepEqual(await records.get({id}).consistent().select(city, label).toPromise(), expected);
+        assert.deepEqual(await records.get({id}).consistent().select(records.path('labels', 0), label).toPromise(),
+            {labels: [{name: 'a', rank: 0}, {name: 'b'}]});
+        assert.deepEqual(await records.getBatch([{id}], {consistentRead: true, select: [city, label]}), [expected]);
+        assert.deepEqual(await records.scan().consistent().where('id').eq(id)
+            .whereAny(group => group.where(records.path('dictionary', 'entry', 'active')).eq(true)
+                .where(records.path('choice', 'value')).eq(2)).select(city, label).toPromise(), [expected]);
+        await typedTransaction(dynamoDBClient).add(table, builder => builder.update({id}).set(city).eq('Manchester')
+            .whereAll(group => group.where(city).beginsWith('Lon').where('labels').size().gte(2))).toPromise();
+        assert.deepEqual(await records.get({id}).select(city).toPromise(), {profile: {city: 'Manchester'}});
+        await records.update({id}).remove('profile').toPromise();
+        assert.deepEqual(await records.get({id}).select(city).toPromise(), {});
     });
 
     test('conditional single-item writes return old attributes only when requested', async (context) => {
@@ -450,6 +594,23 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
             assert.deepEqual(account, [{group: 1, id: 'projected', account: 'account'}]);
             assert.deepEqual(stats, [{group: 1, id: 'projected', createdBy: 'creator'}]);
             assert.deepEqual(local, [{payload: 'base-only'}]);
+            const accountScan = await queryUntilCount(() => query().scan().usingIndex('account').where('account').eq('account').toPromise<any[]>(), 1);
+            assert.deepEqual(accountScan, account);
+            assert.deepEqual(await queryUntilCount(() => query().scan().usingIndex('stats').where('group').eq(1).toPromise<any[]>(), 1), stats);
+            assert.deepEqual(await query().scan().usingIndex('label', 'local').consistent().select('payload').toPromise(), local);
+            assert.deepEqual(await query().scan().usingIndex('label', 'local').where('payload').eq('base-only').toPromise(), []);
+            assert.deepEqual(await query().scan().usingIndex('label', 'local').select('payload').where('payload').eq('base-only').toPromise(), local);
+            assert.deepEqual(await query().scan().usingIndex('label', 'local').select('payload').where('createdBy').eq('creator').toPromise(), local);
+            const typed = defineTable({name: definition.name,
+                schema: z.object({group: z.number(), id: z.string(), account: z.string(), label: z.string(), createdBy: z.string(), payload: z.string()}),
+                key: {partition: 'group', sort: 'id'}, indexes: {
+                    account: {kind: 'global', partition: 'account', sort: 'id', projection: {type: 'KEYS_ONLY'}},
+                    label: {kind: 'local', partition: 'group', sort: 'label', projection: {type: 'KEYS_ONLY'}}}}).using(dynamoDBClient);
+            assert.deepEqual(await queryUntilCount(() => typed.index('account').scan().where('account').eq('account').toPromise(), 1), account);
+            assert.deepEqual(await typed.index('label').scan().consistent().select('payload').toPromise(), local);
+            await assert.rejects(query().scan().usingIndex('account').select('payload').toPromise(), DynamoDBServiceException);
+            assert.deepEqual(await query().scan().usingIndex('account').where('payload').eq('base-only').toPromise(), []);
+            assert.deepEqual(await query().scan().usingIndex('account').where('payload').not().exists().toPromise(), account);
             await assert.rejects(
                 query().query({account: 'account'}).usingIndex('account').select('payload').toPromise(),
                 DynamoDBServiceException
@@ -1849,6 +2010,33 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
         await query().createBatch(documents);
         const read = () => query().query({category: 'c'}).usingIndex('category');
         await queryUntilCount(() => read().toPromise<any[]>(), 4);
+        const scan = () => query().scan().usingIndex('category');
+        assert.deepEqual((await queryUntilCount(() => scan().toPromise<any[]>(), 4)).map(item => item.id).sort(), ['a', 'b', 'c', 'd']);
+        const scanIds: string[] = [];
+        for await (const page of scan().where('category').eq('c').select('id').pages<any>({limit: 1})) {
+            scanIds.push(...page.items.map(item => item.id));
+            if (page.cursor !== null) assert.deepEqual(Object.keys(page.cursor).sort(), ['category', 'id', 'rank']);
+        }
+        assert.deepEqual(scanIds.sort(), ['a', 'b', 'c', 'd']);
+        assert.equal(await scan().where('rank').gte(2).count().toPromise(), 2);
+        assert.equal((await scan().limit(1, 2).toResponse<any[]>()).value.length, 2);
+        const filtered: string[] = [];
+        for await (const page of scan().where('value').gte(30).pages<any>({limit: 1})) filtered.push(...page.items.map(item => item.id));
+        assert.deepEqual(filtered.sort(), ['c', 'd']);
+        const empty = await scan().where('value').gt(100).page<any>({limit: 1});
+        assert.deepEqual(empty.items, []);
+        assert.ok(empty.cursor);
+        const segments: string[] = [];
+        for (let segment = 0; segment < 3; segment++) {
+            for await (const page of scan().parallel(segment, 3).pages<any>({limit: 1})) segments.push(...page.items.map(item => item.id));
+        }
+        assert.deepEqual(segments.sort(), ['a', 'b', 'c', 'd']);
+        assert.equal(new Set(segments).size, 4);
+        const streamed: string[] = [];
+        for await (const item of scan().items<any>({limit: 1})) streamed.push(item.id);
+        assert.deepEqual(streamed.sort(), ['a', 'b', 'c', 'd']);
+        assert.throws(() => query().scan().consistent().usingIndex('category'), /consistent reads/);
+        assert.throws(() => scan().consistent(), /consistent reads/);
         for (const descending of [false, true]) {
             const seen: string[] = [];
             const ranks: number[] = [];

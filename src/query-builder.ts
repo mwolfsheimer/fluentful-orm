@@ -3,7 +3,10 @@ import type {DynamoDBClient, TransactWriteItem} from "@aws-sdk/client-dynamodb";
 import type {TableDescription} from "@aws-sdk/client-dynamodb";
 import {runBatchChunks} from "./batch-runner";
 import {ExpressionBuilder} from "./expression-builder";
-import {createComparisonQuery, createConditionalQuery} from "./fluent-query";
+import {isAttributeReference, pathSegments, uniquePaths} from './document-path';
+import type {AttributePath} from './document-path';
+import {collectPredicates, predicateComparison} from './predicate';
+import type {PredicateCallback} from './predicate';
 import {QueryExecutor} from "./query-executor";
 import {QueryRequestState} from "./query-request-state";
 import {QueryTableAdmin} from "./query-table-admin";
@@ -35,7 +38,7 @@ export class QueryBuilder {
     private _response: Promise<DynamoResponse<any>> | null = null;
     private _result: Promise<ConditionalWriteResult<unknown, unknown>> | null = null;
     private _executionMode: 'all' | 'page' | 'iterator' | null = null;
-    private _projection: string[] | null = null;
+    private _projection: AttributePath[] | null = null;
     private _count = false;
     private queryKeys = new Set<string>();
     private sortKeyAdded = false;
@@ -44,7 +47,7 @@ export class QueryBuilder {
     constructor(
         private tableName: string,
         private dynamoDB: DynamoDBClient,
-        private documentParser: null | ((document: unknown, projection?: readonly string[] | null) => GenericDocument<any>) = null
+        private documentParser: null | ((document: unknown, projection?: readonly AttributePath[] | null) => GenericDocument<any>) = null
     ) {}
 
     private with(doc: UpdateDocumentWith): UpdateWithQuery {
@@ -65,7 +68,7 @@ export class QueryBuilder {
         return this.updateWithQuery();
     }
 
-    private set_set(attribute: string): SetSubQuery {
+    private set_set(attribute: AttributePath): SetSubQuery {
         return {
             eq: (val: any): UpdateSubQuery => this.applyUpdate(UpdateExpressionType.SET, attribute, val)
         };
@@ -83,17 +86,20 @@ export class QueryBuilder {
         };
     }
 
-    private set_remove(attribute: string): UpdateSubQuery {
+    private set_remove(attribute: AttributePath): UpdateSubQuery {
         return this.applyUpdate(UpdateExpressionType.REMOVE, attribute);
     }
 
-    private applyUpdate(type: UpdateExpressionType, attribute: string, value?: unknown): UpdateSubQuery {
-        this.addExpressionAttributeName(attribute);
-        this.addUpdateExpression(type, attribute);
-
-        if (type !== UpdateExpressionType.REMOVE) {
-            this.addExpressionAttributeValue(attribute, value);
+    private applyUpdate(type: UpdateExpressionType, attribute: AttributePath, value?: unknown): UpdateSubQuery {
+        if (isAttributeReference(value)) throw new Error('Stored references are not supported in update assignments');
+        const segments = pathSegments(attribute);
+        if (this.request.hasKey(segments[0] as string)) throw new Error('Primary key attributes cannot be updated');
+        if ((type === UpdateExpressionType.ADD || type === UpdateExpressionType.DELETE) && segments.length !== 1) {
+            throw new Error('ADD and DELETE support top-level attributes only');
         }
+        if (type !== UpdateExpressionType.REMOVE) QuerySerializer.serialiseItem(value);
+        this.addUpdateExpression(type, attribute);
+        if (type !== UpdateExpressionType.REMOVE) this.addExpressionAttributeValue(attribute, value);
 
         this.applyModifiedTimestamp();
         return this.updateSubQuery();
@@ -113,7 +119,7 @@ export class QueryBuilder {
         return {
             ...this.conditionFailureReturnQuery(() => this.updateSubQuery()),
             toResult: this.toResult.bind(this),
-            where: this.updateWhereCondition.bind(this),
+            ...this.predicateChain(() => this.updateSubQuery(), false),
             returningAllNew: this.updateReturningAllNew.bind(this),
             returningAllOld: this.updateReturningAllOld.bind(this),
             returningNone: this.updateReturningNone.bind(this),
@@ -291,11 +297,8 @@ export class QueryBuilder {
         return this
     }
 
-    private getBatchWorker(keys: GenericDocument<GetSelector>[], consistentRead = false, select?: string[]): QueryBuilder {
-        const unique = select === undefined ? undefined : Array.from(new Set(select));
-        if (unique !== undefined && (unique.length === 0 || unique.some((attribute) => typeof attribute !== 'string' || attribute.length === 0))) {
-            throw new Error('Projection requires at least one attribute');
-        }
+    private getBatchWorker(keys: GenericDocument<GetSelector>[], consistentRead = false, select?: AttributePath[]): QueryBuilder {
+        const unique = select === undefined ? undefined : uniquePaths(select);
         if (unique !== undefined) {
             this._projection = unique;
         }
@@ -307,7 +310,7 @@ export class QueryBuilder {
         };
         if (unique !== undefined) {
             const expressions = new ExpressionBuilder();
-            request.ProjectionExpression = unique.map((attribute) => expressions.addName(attribute)).join(', ');
+            request.ProjectionExpression = unique.map((attribute) => expressions.addPath(attribute)).join(', ');
             expressions.applyTo(request);
         }
         this.request.startBatchGet({[this.tableName]: request});
@@ -361,20 +364,7 @@ export class QueryBuilder {
     public usingIndex(index: string, kind: IndexKind = 'global'): SubQuery {
         this.request.setIndex(index, kind);
 
-        return {
-            consistent: this.subQueryConsistent.bind(this),
-            ascending: this.subQueryAscending.bind(this),
-            descending: this.subQueryDescending.bind(this),
-            returnCapacity: this.subQueryReturnCapacity.bind(this),
-            where: this.queryAndScanWhere.bind(this),
-            select: this.subQuerySelect.bind(this),
-            count: this.count.bind(this),
-            page: this.page.bind(this),
-            pages: this.pages.bind(this),
-            items: this.items.bind(this),
-            toPromise: this.toPromise.bind(this),
-            toResponse: this.toResponse.bind(this)
-        };
+        return this.request.isScan() ? this.scanResult() as unknown as SubQuery : this.subQuery();
     }
 
     /** Starts a Scan operation. */
@@ -426,7 +416,7 @@ export class QueryBuilder {
     }
 
     /** Projects selected attributes from a GetItem operation. */
-    public select(...attributes: string[]): QueryBuilder {
+    public select(...attributes: AttributePath[]): QueryBuilder {
         this.applyProjection(attributes);
         return this;
     }
@@ -533,7 +523,7 @@ export class QueryBuilder {
             ascending: this.queryAscending.bind(this),
             descending: this.queryDescending.bind(this),
             returnCapacity: this.queryReturnCapacity.bind(this),
-            where: this.queryAndScanWhere.bind(this),
+            ...this.predicateChain(() => this.queryResult(), true),
             usingIndex: this.usingIndex.bind(this),
             sortKey: this.querySortKey.bind(this),
             select: this.querySelect.bind(this),
@@ -596,7 +586,7 @@ export class QueryBuilder {
             ascending: this.queryAscending.bind(this),
             descending: this.queryDescending.bind(this),
             returnCapacity: this.queryReturnCapacity.bind(this),
-            where: this.queryAndScanWhere.bind(this),
+            ...this.predicateChain(() => this.queryResult(), true),
             usingIndex: this.usingIndex.bind(this),
             sortKey: this.querySortKey.bind(this),
             select: this.querySelect.bind(this),
@@ -609,11 +599,11 @@ export class QueryBuilder {
         };
     }
 
-    private addUpdateExpression(type: UpdateExpressionType, name: string): void {
+    private addUpdateExpression(type: UpdateExpressionType, name: AttributePath): void {
         this.expressions.addUpdate(type, name);
     }
 
-    private addExpressionAttributeValue(attribute: string, val: any): void {
+    private addExpressionAttributeValue(attribute: AttributePath, val: any): void {
         this.expressions.addValue(attribute, val);
     }
 
@@ -621,29 +611,27 @@ export class QueryBuilder {
         this.expressions.addName(name);
     }
 
-    private addWhereExpression(whereKey: string, operator: string, val: any, isNot: boolean, filter: boolean): void {
-        this.expressions.addComparison(whereKey, operator, val, isNot, filter);
-    }
-
-    private addWhereInExpression(whereKey: string, val: unknown[], isNot: boolean, filter: boolean): void {
-        this.expressions.addInComparison(whereKey, val, isNot, filter);
-    }
-
-    private queryAndScanWhere(whereKey: string): QueryScanWhereSubQuery {
-        return createComparisonQuery(
-            () => this.subQuery(),
-            (operator, value, negated) => this.addWhereExpression(whereKey, operator, value, negated, true),
-            (values, negated) => this.addWhereInExpression(whereKey, values, negated, true)
-        );
+    private predicateChain<TResult>(next: () => TResult, filter: boolean) {
+        const group = (operator: 'AND' | 'OR' | 'NOT', callback: PredicateCallback): TResult => {
+            this.expressions.addPredicate(collectPredicates(operator, callback), filter);
+            return next();
+        };
+        return {
+            where: (attribute: AttributePath) => predicateComparison(attribute, predicate => this.expressions.addPredicate(predicate, filter), next),
+            whereAny: (callback: PredicateCallback) => group('OR', callback),
+            whereAll: (callback: PredicateCallback) => group('AND', callback),
+            whereNot: (callback: PredicateCallback) => group('NOT', callback)
+        };
     }
 
     private subQuery(): SubQuery {
+        if (this.request.isScan()) return this.scanResult() as unknown as SubQuery;
         return {
             consistent: this.subQueryConsistent.bind(this),
             ascending: this.subQueryAscending.bind(this),
             descending: this.subQueryDescending.bind(this),
             returnCapacity: this.subQueryReturnCapacity.bind(this),
-            where: this.queryAndScanWhere.bind(this),
+            ...this.predicateChain(() => this.subQuery(), true),
             select: this.subQuerySelect.bind(this),
             count: this.count.bind(this),
             page: this.page.bind(this),
@@ -654,20 +642,11 @@ export class QueryBuilder {
         };
     }
 
-    private createWhereCondition(whereKey: string): CreateNotWhereQuery {
-        return createConditionalQuery(
-            () => this.createQueryResult(),
-            (operator, value, negated) => this.addWhereExpression(whereKey, operator, value, negated, false),
-            (values, negated) => this.addWhereInExpression(whereKey, values, negated, false),
-            (exists) => this.expressions.addExistsCondition(whereKey, exists)
-        );
-    }
-
     private createQueryResult(): CreateQuery {
         return {
             ...this.conditionFailureReturnQuery(() => this.createQueryResult()),
             toResult: this.toResult.bind(this),
-            where: this.createWhereCondition.bind(this),
+            ...this.predicateChain(() => this.createQueryResult(), false),
             returningAllOld: this.createReturningAllOld.bind(this),
             returnCapacity: (mode) => {
                 this.returnCapacity(mode);
@@ -682,20 +661,11 @@ export class QueryBuilder {
         };
     }
 
-    private deleteWhereCondition(whereKey: string): DeleteNotWhereQuery {
-        return createConditionalQuery(
-            () => this.deleteQueryResult(),
-            (operator, value, negated) => this.addWhereExpression(whereKey, operator, value, negated, false),
-            (values, negated) => this.addWhereInExpression(whereKey, values, negated, false),
-            (exists) => this.expressions.addExistsCondition(whereKey, exists)
-        );
-    }
-
     private deleteQueryResult(): DeleteQuery {
         return {
             ...this.conditionFailureReturnQuery(() => this.deleteQueryResult()),
             toResult: this.toResult.bind(this),
-            where: this.deleteWhereCondition.bind(this),
+            ...this.predicateChain(() => this.deleteQueryResult(), false),
             returningAllOld: this.deleteReturningAllOld.bind(this),
             returningNone: this.deleteReturningNone.bind(this),
             returnCapacity: (mode) => {
@@ -726,31 +696,13 @@ export class QueryBuilder {
         return this.deleteQueryResult();
     }
 
-    private conditionCheckWhereCondition(whereKey: string): ConditionCheckNotWhereQuery {
-        return createConditionalQuery(
-            () => this.conditionCheckQueryResult(),
-            (operator, value, negated) => this.addWhereExpression(whereKey, operator, value, negated, false),
-            (values, negated) => this.addWhereInExpression(whereKey, values, negated, false),
-            (exists) => this.expressions.addExistsCondition(whereKey, exists)
-        );
-    }
-
     private conditionCheckQueryResult(): ConditionCheckQuery {
         return {
             ...this.conditionFailureReturnQuery(() => this.conditionCheckQueryResult()),
-            where: this.conditionCheckWhereCondition.bind(this),
+            ...this.predicateChain(() => this.conditionCheckQueryResult(), false),
             toPromise: this.toPromise.bind(this),
             toResponse: this.toResponse.bind(this)
         };
-    }
-
-    private updateWhereCondition(whereKey: string): UpdateNotWhereQuery {
-        return createConditionalQuery(
-            () => this.updateSubQuery(),
-            (operator, value, negated) => this.addWhereExpression(whereKey, operator, value, negated, false),
-            (values, negated) => this.addWhereInExpression(whereKey, values, negated, false),
-            (exists) => this.expressions.addExistsCondition(whereKey, exists)
-        );
     }
 
     private updateQuery(): UpdateQuery {
@@ -815,7 +767,7 @@ export class QueryBuilder {
             returnCapacity: this.queryReturnCapacity.bind(this),
             usingIndex: this.usingIndex.bind(this),
             sortKey: this.querySortKey.bind(this),
-            where: this.queryAndScanWhere.bind(this),
+            ...this.predicateChain(() => this.queryResult(), true),
             select: this.querySelect.bind(this),
             count: this.count.bind(this),
             page: this.page.bind(this),
@@ -826,23 +778,27 @@ export class QueryBuilder {
         };
     }
 
-    private querySelect(...attributes: string[]): Query {
+    private querySelect(...attributes: AttributePath[]): Query {
         this.applyProjection(attributes);
         return this.queryResult();
     }
 
-    private scanSelect(...attributes: string[]): Scan {
+    private scanSelect(...attributes: AttributePath[]): Scan {
         this.applyProjection(attributes);
         return this.scanResult();
     }
 
     private scanResult(): Scan {
         return {
+            usingIndex: (index, kind = 'global') => {
+                this.request.setIndex(index, kind);
+                return this.scanResult();
+            },
             limit: this.scanLimit.bind(this),
             consistent: this.scanConsistent.bind(this),
             parallel: this.scanParallel.bind(this),
             returnCapacity: this.scanReturnCapacity.bind(this),
-            where: this.queryAndScanWhere.bind(this),
+            ...this.predicateChain(() => this.scanResult(), true),
             select: this.scanSelect.bind(this),
             count: this.count.bind(this),
             page: this.page.bind(this),
@@ -853,20 +809,17 @@ export class QueryBuilder {
         };
     }
 
-    private subQuerySelect(...attributes: string[]): SubQuery {
+    private subQuerySelect(...attributes: AttributePath[]): SubQuery {
         this.applyProjection(attributes);
         return this.subQuery();
     }
 
-    private applyProjection(attributes: string[]): void {
+    private applyProjection(attributes: AttributePath[]): void {
         if (this._count) {
             throw new Error('Projection cannot be combined with count');
         }
-        const unique = Array.from(new Set(attributes));
-        if (unique.length === 0 || unique.some((attribute) => typeof attribute !== 'string' || attribute.length === 0)) {
-            throw new Error('Projection requires at least one attribute');
-        }
-        const aliases = unique.map((attribute) => this.expressions.addName(attribute));
+        const unique = uniquePaths(attributes);
+        const aliases = unique.map((attribute) => this.expressions.addPath(attribute));
         this._projection = unique;
         this.request.setProjection(aliases);
     }

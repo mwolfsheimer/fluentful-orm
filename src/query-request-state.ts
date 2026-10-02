@@ -126,13 +126,13 @@ export class QueryRequestState {
 
     /** Selects a secondary index and validates global-index consistency rules. */
     setIndex(indexName: string, kind: IndexKind): void {
-        if (this.operation === null || this.operation.kind !== 'query') {
-            throw new Error('Index selection requires a query operation; index scans are not supported');
+        if (this.operation === null || (this.operation.kind !== 'query' && this.operation.kind !== 'scan')) {
+            throw new Error('Index selection requires a query operation or scan operation');
         }
         if (typeof indexName !== 'string' || indexName.length === 0 || !['global', 'local'].includes(kind)) {
             throw new Error('Index selection requires a name and a global or local kind');
         }
-        if (this.operation.kind === 'query') {
+        if (this.operation.kind === 'query' || this.operation.kind === 'scan') {
             if (kind === 'global' && this.operation.input.ConsistentRead === true) {
                 throw new Error(`Global secondary index ${indexName} does not support consistent reads`);
             }
@@ -146,10 +146,15 @@ export class QueryRequestState {
         if (this.operation === null || (this.operation.kind !== 'getItem' && this.operation.kind !== 'query' && this.operation.kind !== 'scan')) {
             throw new Error('Consistent reads require a get, query, or scan operation');
         }
-        if (this.operation.kind === 'query' && this.indexKind === 'global') {
+        if ((this.operation.kind === 'query' || this.operation.kind === 'scan') && this.indexKind === 'global') {
             throw new Error(`Global secondary index ${this.operation.input.IndexName} does not support consistent reads`);
         }
         this.operation.input.ConsistentRead = true;
+    }
+
+    /** Reports whether the active read is a scan. */
+    isScan(): boolean {
+        return this.operation?.kind === 'scan';
     }
 
     /** Changes query sort-key traversal direction. */

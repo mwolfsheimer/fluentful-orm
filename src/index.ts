@@ -1,4 +1,7 @@
 export {Quewe} from "./quewe";
+export {path, ref} from './document-path';
+export type {AttributePath, AttributeReference, DocumentPath, PathSegment} from './document-path';
+export type {ExpressionAttributeType, PredicateCallback, PredicateComparison, PredicateScope, SizeComparison} from './predicate';
 export {QueryBuilder, defineTable, createTable, deleteTable, describeTable, getTableDefinition, listTables, transactWrite} from "./query-builder";
 export {QuerySerializer} from "./query-serializer";
 export {ValueUtils} from './value-utils';
@@ -25,6 +28,10 @@ export type {
 	UpdateReturnMode
 } from './types';
 export type {
+	PathValue,
+	ProjectedRecord,
+	TypedPredicateGroups,
+	TypedPredicateScope,
 	IndexDefinition,
 	IndexProjection,
 	KeyDefinition,

@@ -5,6 +5,78 @@ import {createTable, defineTable, deleteTable, describeTable, getTableDefinition
 import {QuerySerializer} from '../src/query-serializer';
 import {createFakeDynamoDB} from './fake-dynamodb';
 import {z} from 'zod';
+import {path, ref} from '../src/document-path';
+import {ExpressionBuilder} from '../src/expression-builder';
+import {collectPredicates} from '../src/predicate';
+import type {ExpressionTarget} from '../src/expression-builder';
+
+test('compiles scoped predicates and rolls back invalid callbacks', () => {
+    const expressions = new ExpressionBuilder();
+    expressions.addPredicate(collectPredicates('OR', group => group.where('status').eq('open')
+        .whereAll(group => group.where('priority').gte(3).where('archived').eq(false))
+        .whereNot(group => group.where(path('pricing', 'sale')).lt(ref('pricing', 'regular')))), true);
+    const target: ExpressionTarget = {};
+    expressions.applyTo(target);
+    assert.equal(target.FilterExpression, '(#status = :condition0 OR (#priority >= :condition1 AND #archived = :condition2) OR NOT (#pricing.#sale < #pricing.#regular))');
+    assert.equal(Object.keys(target.ExpressionAttributeValues!).length, 3);
+    for (const callback of [() => undefined, (group: any) => group.where('a'),
+        (group: any) => { group.where('a').eq(1); throw new Error('failed'); },
+        async (group: any) => group.where('a').eq(1)]) {
+        assert.throws(() => expressions.addPredicate(collectPredicates('AND', callback as any), true));
+    }
+    expressions.applyTo(target);
+    assert.equal(Object.keys(target.ExpressionAttributeValues!).length, 3);
+});
+
+test('keeps explicit paths immutable and distinct from literal dotted attribute names', () => {
+    const expressions = new ExpressionBuilder();
+    const city = path('profile', 'address', 'city');
+    assert.equal(expressions.addPath(city), '#profile.#address.#city');
+    assert.equal(expressions.addPath(path('labels', 0)), '#labels[0]');
+    assert.equal(expressions.addPath('profile.address.city'), '#name0');
+    assert.ok(Object.isFrozen(city));
+    assert.ok(Object.isFrozen(city.segments));
+    assert.ok(Object.isFrozen(ref('quota')));
+    for (const segments of [[], [0], [''], ['labels', -1], ['labels', 0.5], ['labels', Infinity], Array(34).fill('field')]) {
+        assert.throws(() => path(...segments as any));
+    }
+});
+
+test('exposes paths, groups, functions, references and index scans through public chains', async () => {
+    const fake = createFakeDynamoDB(() => ({Items: [], Attributes: {}, Responses: {test: []}}));
+    const scan = new QueryBuilder('test', fake.db).scan().usingIndex('category-index')
+        .whereAny(group => group.where(path('profile', 'city')).beginsWith('Lon')
+            .whereAll(group => group.where('used').lte(ref('quota')).where('payload').attributeType('M')))
+        .whereNot(group => group.where('blocked').exists())
+        .where('labels').size().not().between(-0.5, 2.5).where('score').in([ref('quota'), 3])
+        .select('odd.name', path('labels', 1)).parallel(0, 4).limit(25);
+    assert.equal((scan as any).ascending, undefined);
+    await scan.toPromise();
+    const input = fake.inputs[0];
+    assert.equal(input.IndexName, 'category-index');
+    assert.equal(input.TotalSegments, 4);
+    assert.match(input.FilterExpression, /size\(#labels\) BETWEEN/);
+    assert.match(input.FilterExpression, /#used <= #quota/);
+    assert.match(input.ProjectionExpression, /#labels\[1\]/);
+    assert.ok(!Object.values(input.ExpressionAttributeValues).some((value: any) => value.M));
+    await new QueryBuilder('test', fake.db).update({id: 'one'}).set(path('profile', 'city')).eq('Manchester')
+        .remove(path('labels', 1)).whereAll(group => group.where('used').between(ref('minimum'), ref('quota'))).toPromise();
+    assert.match(fake.inputs[1].UpdateExpression, /SET #profile.#city = :update0 REMOVE #labels\[1\]/);
+    await new QueryBuilder('test', fake.db).getBatch([{id: 'one'}], {select: [path('profile', 'city')]});
+    assert.equal(fake.inputs[2].RequestItems.test.ProjectionExpression, '#profile.#city');
+    for (const order of [true, false]) {
+        assert.throws(() => order ? new QueryBuilder('test', fake.db).scan().consistent().usingIndex('gsi')
+            : new QueryBuilder('test', fake.db).scan().usingIndex('gsi').consistent(), /consistent reads/);
+    }
+    assert.doesNotThrow(() => new QueryBuilder('test', fake.db).scan().consistent().usingIndex('lsi', 'local'));
+    assert.throws(() => new QueryBuilder('test', fake.db).update({id: 'one'}).set(path('id', 'value')).eq(2), /key attributes/);
+    assert.throws(() => new QueryBuilder('test', fake.db).update({id: 'one'}).set('profile').eq({}).remove(path('profile', 'city')), /Overlapping/);
+    assert.throws(() => new QueryBuilder('test', fake.db).scan().where('labels').size().gt(Infinity), /finite numbers/);
+    assert.throws(() => new QueryBuilder('test', fake.db).scan().where('payload').attributeType('X' as any), /attribute type/);
+    assert.equal((new QueryBuilder('test', fake.db).scan().where('labels').size() as any).contains, undefined);
+    assert.throws(() => new QueryBuilder('test', fake.db).update({id: 'one'}).set('value').eq(ref('other')), /update assignments/);
+    assert.throws(() => new QueryBuilder('test', fake.db).scan().where('labels').contains(ref('other')), /Function arguments/);
+});
 
 test('allocates safe collision-free aliases for literal attribute names in every expression', async () => {
     const fake = createFakeDynamoDB(() => ({Items: [], Attributes: {id: {S: 'one'}}, Responses: {test: []}}));
@@ -61,7 +133,7 @@ test('enforces IN, query-key, segment and index-selection boundaries before send
     assert.throws(() => new QueryBuilder('test', fake.db).get({id: 'p'}).usingIndex('index'), /query operation/);
     const scan = new QueryBuilder('test', fake.db);
     scan.scan();
-    assert.throws(() => scan.usingIndex('index'), /index scans/);
+    assert.doesNotThrow(() => scan.usingIndex('index'));
     assert.throws(() => new QueryBuilder('test', fake.db).query({id: 'p'}).usingIndex(''), /requires a name/);
     assert.equal(fake.inputs.length, 4);
 });

@@ -73,7 +73,7 @@ const tasksTable = defineTable({
     schema: taskSchema,
     key: {partition: 'projectId', sort: 'taskId'},
     indexes: {
-        'status-index': {partition: 'status', sort: 'priority'}
+        'status-index': {kind: 'global', partition: 'status', sort: 'priority'}
     },
     timestamps: true
 });
@@ -145,9 +145,9 @@ Supported QueryBuilder behaviour:
 
 - Create, get, replace, update/upsert and delete; update/delete return modes; timestamps; batch operations.
 - Scalar, binary, list, map and set values through the existing serializer, with cloned reads and writes to avoid shared references.
-- Generated conditions and filters: comparisons, `IN`, `contains`, existence checks, negation and `AND`; generated sort-key comparisons, `BETWEEN` and `begins_with`.
+- Generated conditions and filters: comparisons, stored-field references, `IN`, `BETWEEN`, `contains`, `begins_with`, existence/type checks, `size`, negation and scoped `AND`/`OR` groups.
 - `SET`, `REMOVE`, numeric/set `ADD`, and set `DELETE` updates.
-- Table/index queries, sparse index membership, sort ordering, scans, projections, counts, page cursors and iterators. Page limits apply before filters, including empty filtered pages with continuation cursors. String ordering uses UTF-8 bytes, binary ordering/equality uses unsigned bytes regardless of JavaScript binary prototypes, and numeric ordering is numeric.
+- Table/index queries and scans, sparse index membership, query sort ordering, nested projections, counts, page cursors and iterators. Page limits apply before filters, including empty filtered pages with continuation cursors. String ordering uses UTF-8 bytes, binary ordering/equality uses unsigned bytes regardless of JavaScript binary prototypes, and numeric ordering is numeric.
 - Atomic cross-table write transactions and condition checks, rollback on failure, conditional failure diagnostics, duplicate-target rejection, and ten-minute transaction request-token idempotency. Typed tables and typed transactions use the same backend.
 - Create, describe, list and delete table operations.
 
@@ -176,7 +176,7 @@ const tasksTable = defineTable({
     schema: taskSchema,
     key: {partition: 'projectId', sort: 'taskId'},
     indexes: {
-        'status-index': {partition: 'status', sort: 'priority'}
+        'status-index': {kind: 'global', partition: 'status', sort: 'priority'}
     },
     timestamps: true
 });
@@ -195,12 +195,12 @@ key: {partition: 'accountId', sort: 'createdAt'}
 
 Key fields must be required schema fields whose output type is `string`, `number`, or `Buffer`. Exact operations such as `get`, `update`, and `delete` require the complete key and no extra properties. A `query` accepts only the partition key because sort-key restrictions are added through `.sortKey()`.
 
-Indexes use the same key shape. Their names and key fields are inferred:
+Indexes use the same key shape, plus a required `kind: 'global'` or `kind: 'local'`. Their names and key fields are inferred:
 
 ```ts
 indexes: {
-    'status-index': {partition: 'status', sort: 'priority'},
-    'owner-index': {partition: 'ownerId'}
+    'status-index': {kind: 'global', partition: 'status', sort: 'priority'},
+    'owner-index': {kind: 'global', partition: 'ownerId'}
 }
 ```
 
@@ -365,9 +365,55 @@ Supported comparisons are:
 .where('notes').exists()
 .where('notes').not().exists()
 .where('status').not().eq('done')
+.where('title').beginsWith('Draft')
+.where('priority').between(3, 10)
+.where('tags').attributeType('SS')
+.where('tags').size().gte(2)
 ```
 
-`.in([])` is invalid. The typed API validates every comparison value against the selected field. For a set or array field, `.contains(value)` validates the member type rather than the collection type.
+`.in([])` is invalid; `IN` accepts at most 100 candidates. The same helpers work in read filters and write conditions. The typed API validates supplied comparison values against the selected field. For a set or array field, `.contains(value)` validates the member type rather than the collection type. String/binary prefixes validate partial operands rather than requiring a complete stored value.
+
+`attributeType()` accepts the separate `ExpressionAttributeType` union: `S`, `N`, `B`, `BOOL`, `NULL`, `M`, `L`, `SS`, `NS`, `BS`. Table/key definitions still accept only `S`, `N`, and `B`. `size()` exposes numeric comparisons, `between()`, `in()`, and `not()`. Thresholds are finite numbers, including negative and fractional numbers. Size uses UTF-16 code units for strings, bytes for binary, and member counts for lists, maps, and sets; missing or unsupported stored operand types do not match positive size comparisons.
+
+### Scoped groups
+
+```ts
+const matches = await tasks.scan()
+    .whereAny(group => group
+        .where('status').eq('doing')
+        .whereAll(all => all
+            .where('priority').gte(3)
+            .where('title').beginsWith('Draft')))
+    .whereNot(group => group.where('status').eq('done'))
+    .toPromise();
+```
+
+The filter is equivalent to:
+
+```text
+(status = 'doing' OR (priority >= 3 AND begins_with(title, 'Draft')))
+AND NOT (status = 'done')
+```
+
+`whereAny`, `whereAll`, and `whereNot` create explicit parenthesized OR, AND, and NOT groups. A NOT group negates the conjunction of its predicates. These callbacks expose predicates only, including nested groups, and also work on conditional writes and transaction conditions. Empty, incomplete, asynchronous, and throwing callbacks fail without committing any of their predicates. Keep callbacks synchronous and do not retain their scoped builders after they return. Repeated ordinary `.where()` calls remain AND.
+
+Use a group to allow alternative states in a conditional write:
+
+```ts
+const completed = await tasks.update(key)
+    .set('status').eq('done')
+    .where('projectId').exists()
+    .whereAny(group => group
+        .where('status').eq('doing')
+        .whereAll(all => all
+            .where('status').eq('todo')
+            .where('priority').gte(3)))
+    .toPromiseOrNull();
+```
+
+This updates an existing task only if its stored status is `doing`, or its stored status is `todo` and priority is at least 3. Conditions inspect the item before the update, not the new `done` value. `completed` is the updated task on success or `null` when the condition fails; other service failures still reject.
+
+See [AWS expression rules](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Expressions.OperatorsAndFunctions.html) for function and operator semantics.
 
 Failed conditions reject with the AWS SDK error, normally `ConditionalCheckFailedException`. For an update where a failed condition is an expected not-found or no-op outcome, use `.toPromiseOrNull()` to return `null` for that error while continuing to propagate other DynamoDB failures:
 
@@ -671,6 +717,43 @@ const matching = await tasks.scan().consistent().where('status').eq('doing').toP
 
 Scans may consume substantial read capacity. Prefer a query for request paths and known access patterns.
 
+### Index scans
+
+```ts
+await tasks.index('status-index').scan()
+    .where('status').eq('doing')
+    .limit(25)
+    .toPromise();
+```
+
+A low-level scan can read one parallel segment:
+
+```ts
+const firstSegment = await new QueryBuilder('tasks', dynamoDB).scan()
+    .usingIndex('status-index', 'global')
+    .parallel(0, 4)
+    .toPromise();
+```
+
+`firstSegment` contains only segment `0` of four, not the whole index. To read every segment, create an independent operation for each:
+
+```ts
+const segments = [0, 1, 2, 3];
+const segmentResults = await Promise.all(segments.map(segment =>
+    new QueryBuilder('tasks', dynamoDB).scan()
+        .usingIndex('status-index', 'global')
+        .parallel(segment, segments.length)
+        .toPromise()
+));
+const indexedTasks = segmentResults.flat();
+```
+
+Each `toPromise()` follows all pages for its segment. This runs four segment reads concurrently; merging their results does not impose an order or provide a point-in-time snapshot of a changing index.
+
+Index scans support projections, counts, pagination, lazy pages/items, hard limits, consumed-capacity metadata, and parallel segments. They have no ascending/descending controls. GSI consistent reads are rejected before sending in either modifier order. LSI scans support consistency and may explicitly select permitted non-projected table fields. GSI reads can return only projected fields; typed index filters and references also require projected fields. Low-level GSI scan filters see non-projected fields as absent. Query-key filter restrictions do not apply to scans.
+
+Scan results are unordered. Pass continuation cursors unchanged, including table/index keys, and use each parallel-scan cursor only with its original segment. See the [AWS Scan API](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_Scan.html).
+
 ## Projections and counts
 
 ### Select fields
@@ -687,6 +770,107 @@ const summaries = await tasks
 ```
 
 Projected records are validated with a projection schema. At least one field is required, and duplicate fields are removed.
+
+### Document paths and references
+
+These examples use the `dynamoDB` client from the quick start and assume a `records` table already exists with `id` as its string partition key.
+
+```ts
+const records = defineTable({
+    name: 'records',
+    key: {partition: 'id'},
+    schema: z.object({
+        id: z.string(), used: z.number(), quota: z.number(),
+        profile: z.object({
+            address: z.object({city: z.string(), country: z.string().default('GB')}),
+            nickname: z.string().optional()
+        }),
+        labels: z.array(z.string())
+    })
+}).using(dynamoDB);
+
+const recordKey = {id: 'record-1'};
+await records.create({
+    ...recordKey,
+    used: 2,
+    quota: 5,
+    profile: {address: {city: 'London', country: 'GB'}},
+    labels: ['review', 'urgent', 'draft']
+}).toPromise();
+
+const city = records.path('profile', 'address', 'city');
+const secondLabel = records.path('labels', 1);
+const nickname = records.path('profile', 'nickname');
+const summary = await records.get(recordKey).consistent()
+    .select('id', city, secondLabel, nickname).toPromise();
+```
+
+`summary` is:
+
+```json
+{
+    "id": "record-1",
+    "profile": {"address": {"city": "London"}},
+    "labels": ["urgent"]
+}
+```
+
+The original `labels[1]` becomes the only element of the returned list, at position `0`. The absent `nickname` is omitted. The unselected `country` is also omitted, even though its schema has a default; projection parsing does not fill it in.
+
+Reuse the same paths in batch reads, filters, and conditional updates:
+
+```ts
+const summaries = await records.getBatch([recordKey], {
+    consistentRead: true,
+    select: ['id', city, secondLabel, nickname]
+});
+
+const withinQuota = await records.scan()
+    .where(city).eq('London')
+    .where('used').lte(records.ref('quota'))
+    .toPromise();
+
+const updated = await records.update(recordKey)
+    .set(city).eq('Manchester')
+    .remove(secondLabel)
+    .where('used').lt(records.ref('quota'))
+    .toPromiseOrNull();
+```
+
+For the seeded record, `summaries` is `[summary]`, and the filter includes the record because its stored `used` value is 2 and `quota` is 5. The conditional update returns:
+
+```json
+{
+    "id": "record-1",
+    "used": 2,
+    "quota": 5,
+    "profile": {"address": {"city": "Manchester", "country": "GB"}},
+    "labels": ["review", "draft"]
+}
+```
+
+The update preserves unmodified fields and removes the element at the original list position `1`. If the stored `used` value is no longer below `quota`, it returns `null` without applying either change.
+
+Both table definitions and bound tables expose schema-aware `path()` and `ref()` helpers. The low-level equivalents are named exports: `import {path, ref} from '@fluentful/orm'`. Descriptors and their segments are immutable. String segments identify map fields, numeric segments identify non-negative integer list positions, and paths allow at most 32 dereferences. Ordinary strings remain literal attribute names: `'profile.address.city'` is one field, not a nested path.
+
+For example, these low-level filters address different attributes:
+
+```ts
+import {path, QueryBuilder} from '@fluentful/orm';
+
+const literalMatches = await new QueryBuilder('records', dynamoDB).scan()
+    .where('profile.address.city').eq('Manchester').toPromise();
+const nestedMatches = await new QueryBuilder('records', dynamoDB).scan()
+    .where(path('profile', 'address', 'city')).eq('Manchester').toPromise();
+```
+
+For the seeded record after the update, only the nested filter matches: the record has no literal top-level attribute named `profile.address.city`.
+
+Paths work in filters, conditions, projections (including `getBatch(..., {select: [...]})`), SET, and REMOVE. ADD and DELETE remain top-level only. Invalid segments, primary-key mutations, and overlapping parent/child updates or projections fail before sending. Nested SET requires existing parent containers and does not create missing maps. Multiple list updates/removals address original list positions. See [AWS update expressions](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Expressions.UpdateExpressions.html).
+
+Projected maps retain their nested shape. Selected list elements form compacted lists, in original list order, without holes or objects keyed by original indices. Missing selections are omitted, including parent containers with no selected descendants. Nested projection types use partial fields and arrays; parsing validates only returned branches and does not materialize absent fields from defaults. Whole top-level string selections retain the existing `Pick` result types.
+
+References are explicit stored-field operands for EQ/NE, ordered comparisons, BETWEEN bounds, and IN candidates. They are resolved against the consuming table/index schema, never serialized as supplied values. The left path must differ from any referenced right operand, as required by DynamoDB. Ordinary strings and objects remain literal values. `ref('pricing', 'regular')` addresses a nested field, while `ref('pricing.regular')` addresses one literal name. References as function arguments, SET-from-another-field assignments, `if_not_exists`, `list_append`, and update arithmetic are outside this API.
 
 ### Count matches
 
@@ -907,10 +1091,10 @@ response.consumedCapacity; // one entry per DynamoDB request or page
 - Attribute strings, including names containing dots, spaces or hyphens, are literal top-level names. Safe aliases are allocated for conditions, updates, query keys and projections (including batch reads); these strings do not select nested paths.
 - Queries require partition-key equality and at most one sort-key predicate. Key operands must be non-empty strings/binaries or finite DynamoDB-range numbers; key byte limits are enforced. Sort-key `BETWEEN` requires matching types and ordered bounds, and `beginsWith` requires string/binary operands. Typed query filters reject the active table/index keys; use key conditions instead. Base-table keys may be filtered when they are not keys of the selected index.
 - Present secondary-index keys must match their declared scalar types and cannot be null or empty; missing components keep an item out of a sparse index. Typed writes validate present key operands using their definitions before sending; memory validates the resulting items for puts, updates, batches and transactions before mutation. Index cursors contain both table and index keys. Ordering between items with equal index sort keys is unspecified.
-- Parallel scan `totalSegments` is an integer from 1 to 1,000,000, with `0 <= segment < totalSegments`. Query-only `usingIndex()` rejects unsupported operations instead of silently ignoring the selection; index scans are not exposed.
+- Parallel scan `totalSegments` is an integer from 1 to 1,000,000, with `0 <= segment < totalSegments`. `usingIndex()` supports queries and scans and rejects unsupported operations instead of silently ignoring the selection. The typed equivalent is `index(name).query(...)` or `index(name).scan()`.
 - Scan result order is not guaranteed by DynamoDB; the memory backend's insertion order is not a portable ordering contract.
 
-The shared contract includes complex `IN`, nested list-member operands, and missing-versus-null comparisons. Run `npm run test:integration` with AWS credentials to verify these cases against live DynamoDB; passing the offline suite alone does not establish AWS parity. Nested paths, OR/grouping, additional functions, attribute-to-attribute comparisons and index scans remain separate API decisions.
+The shared contract covers complex `IN`, missing-versus-null comparisons, nested paths and projections, scoped AND/OR/NOT groups, condition/filter functions, stored-field references, conditional writes and transactions, and secondary-index scans. Run `npm run test:integration` with AWS credentials to verify these cases against live DynamoDB; passing the offline suite alone does not establish AWS parity.
 
 ## Values and serialization
 
@@ -1092,7 +1276,7 @@ defineTable({
     name,
     schema,
     key: {partition, sort?},
-    indexes?: {name: {partition, sort?}},
+    indexes?: {name: {kind: 'global' | 'local', partition, sort?, projection?}},
     timestamps?: boolean
 })
 ```
@@ -1108,7 +1292,8 @@ defineTable({
 | `delete(key).toPromise()` | old record or `null` |
 | `delete(key).returningNone().toPromise()` | `void` |
 | `query(partitionKey).toPromise()` | records |
-| `index(name).query(partitionKey).toPromise()` | records |
+| `index(name).query(partitionKey).toPromise()` | projection-aware records |
+| `index(name).scan().toPromise()` | projection-aware records |
 | `scan().toPromise()` | records |
 | `createBatch(documents, options?)` | created records |
 | `getBatch(keys, options?)` | records |
@@ -1122,6 +1307,8 @@ defineTable({
 | `sortKey().between(lower, upper)` | inclusive sort-key range |
 | `sortKey().beginsWith(prefix)` | string or binary sort-key prefix |
 | `where(field)...` | add a filter |
+| `whereAny(callback)` / `whereAll(callback)` / `whereNot(callback)` | add a scoped predicate group |
+| `path(...segments)` / `ref(...segments)` | select a document path / stored operand |
 | `select(...fields)` | project and type selected fields |
 | `count().toPromise()` | count matches across pages |
 | `limit(chunkSize, hardLimit?)` | configure all-page reads |

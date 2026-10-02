@@ -1,5 +1,8 @@
 import type {ConsumedCapacity, ItemCollectionMetrics} from '@aws-sdk/client-dynamodb';
 
+import type {AttributePath} from './document-path';
+import type {PredicateComparison, PredicateGroups} from './predicate';
+
 type Binary = Uint8Array;
 
 export type SerialisedItem<T, A> = { L: SerialisedItem<T, any>[] } | { SS: T } | { M: A } | { NS: string[] } | { NULL: boolean } | { S: T } | { N: string } | { BOOL: T } | null
@@ -64,7 +67,7 @@ export interface BatchOptions {
 /** Batch read options in addition to chunk concurrency. */
 export interface BatchGetOptions extends BatchOptions {
     consistentRead?: boolean;
-    select?: string[];
+    select?: AttributePath[];
     returnConsumedCapacity?: ReturnConsumedCapacity;
 }
 /** Batch write options in addition to chunk concurrency. */
@@ -97,32 +100,10 @@ export interface ConditionalWriteFinal {
 }
 
 /** Comparison methods available while building a create condition. */
-export interface CreateWhereQuery {
-    /** Requires the selected attribute to exist. */
-    exists(): CreateQuery;
-    /** Requires the selected attribute to equal the supplied value. */
-    eq(val: any): CreateQuery;
-    /** Requires the selected attribute not to equal the supplied value. */
-    ne(val: any): CreateQuery;
-    /** Requires the selected attribute to be greater than the supplied value. */
-    gt(num: string | number | Binary): CreateQuery;
-    /** Requires the selected attribute to be greater than or equal to the supplied value. */
-    gte(num: string | number | Binary): CreateQuery;
-    /** Requires the selected attribute to be less than the supplied value. */
-    lt(num: string | number | Binary): CreateQuery;
-    /** Requires the selected attribute to be less than or equal to the supplied value. */
-    lte(num: string | number | Binary): CreateQuery;
-    /** Requires the selected attribute to contain the supplied value. */
-    contains(val: unknown): CreateQuery;
-    /** Requires the selected attribute to match one of the supplied values. */
-    in(val: unknown[]): CreateQuery;
-}
+export interface CreateWhereQuery extends PredicateComparison<CreateQuery> {}
 
 /** Negation entry point for a create condition. */
-export interface CreateNotWhereQuery extends CreateWhereQuery {
-    /** Negates the next comparison. */
-    not(): CreateWhereQuery;
-}
+export interface CreateNotWhereQuery extends CreateWhereQuery {}
 
 /** Adds condition-failure return-value selection to a write chain. */
 export interface ConditionFailureReturnQuery<T> {
@@ -139,9 +120,9 @@ export interface ConditionFailureReturnOptions<T> {
 }
 
 /** Fluent result for an untyped create operation. */
-export interface CreateQuery extends ConditionFailureReturnQuery<CreateQuery>, ConditionalWriteFinal {
+export interface CreateQuery extends ConditionFailureReturnQuery<CreateQuery>, ConditionalWriteFinal, PredicateGroups<CreateQuery> {
     /** Adds a condition to the new item before it is created. */
-    where(key: string): CreateNotWhereQuery;
+    where(key: AttributePath): CreateNotWhereQuery;
     /** Returns the item replaced by a successful put, if any. */
     returningAllOld(): CreateQuery;
     /** Requests consumed-capacity metadata in toResponse(). */
@@ -155,37 +136,15 @@ export interface CreateQuery extends ConditionFailureReturnQuery<CreateQuery>, C
 }
 
 /** Comparison methods available while building a delete condition. */
-export interface DeleteWhereQuery {
-    /** Requires the selected attribute to exist. */
-    exists(): DeleteQuery;
-    /** Requires the selected attribute to equal the supplied value. */
-    eq(val: any): DeleteQuery;
-    /** Requires the selected attribute not to equal the supplied value. */
-    ne(val: any): DeleteQuery;
-    /** Requires the selected attribute to be greater than the supplied value. */
-    gt(num: string | number | Binary): DeleteQuery;
-    /** Requires the selected attribute to be greater than or equal to the supplied value. */
-    gte(num: string | number | Binary): DeleteQuery;
-    /** Requires the selected attribute to be less than the supplied value. */
-    lt(num: string | number | Binary): DeleteQuery;
-    /** Requires the selected attribute to be less than or equal to the supplied value. */
-    lte(num: string | number | Binary): DeleteQuery;
-    /** Requires the selected attribute to contain the supplied value. */
-    contains(val: unknown): DeleteQuery;
-    /** Requires the selected attribute to match one of the supplied values. */
-    in(val: unknown[]): DeleteQuery;
-}
+export interface DeleteWhereQuery extends PredicateComparison<DeleteQuery> {}
 
 /** Negation entry point for a delete condition. */
-export interface DeleteNotWhereQuery extends DeleteWhereQuery {
-    /** Negates the next comparison. */
-    not(): DeleteWhereQuery;
-}
+export interface DeleteNotWhereQuery extends DeleteWhereQuery {}
 
 /** Fluent result for an untyped delete operation. */
-export interface DeleteQuery extends ConditionFailureReturnQuery<DeleteQuery>, ConditionalWriteFinal {
+export interface DeleteQuery extends ConditionFailureReturnQuery<DeleteQuery>, ConditionalWriteFinal, PredicateGroups<DeleteQuery> {
     /** Adds a condition to the item before it is deleted. */
-    where(key: string): DeleteNotWhereQuery;
+    where(key: AttributePath): DeleteNotWhereQuery;
     /** Returns the deleted item, when present, in the successful result. */
     returningAllOld(): DeleteQuery;
     /** Omits the deleted item from the successful result. */
@@ -201,37 +160,15 @@ export interface DeleteQuery extends ConditionFailureReturnQuery<DeleteQuery>, C
 }
 
 /** Comparison methods available while building a condition-check condition. */
-export interface ConditionCheckWhereQuery {
-    /** Requires the selected attribute to exist. */
-    exists(): ConditionCheckQuery;
-    /** Requires the selected attribute to equal the supplied value. */
-    eq(val: any): ConditionCheckQuery;
-    /** Requires the selected attribute not to equal the supplied value. */
-    ne(val: any): ConditionCheckQuery;
-    /** Requires the selected attribute to be greater than the supplied value. */
-    gt(num: string | number | Binary): ConditionCheckQuery;
-    /** Requires the selected attribute to be greater than or equal to the supplied value. */
-    gte(num: string | number | Binary): ConditionCheckQuery;
-    /** Requires the selected attribute to be less than the supplied value. */
-    lt(num: string | number | Binary): ConditionCheckQuery;
-    /** Requires the selected attribute to be less than or equal to the supplied value. */
-    lte(num: string | number | Binary): ConditionCheckQuery;
-    /** Requires the selected attribute to contain the supplied value. */
-    contains(val: unknown): ConditionCheckQuery;
-    /** Requires the selected attribute to match one of the supplied values. */
-    in(val: unknown[]): ConditionCheckQuery;
-}
+export interface ConditionCheckWhereQuery extends PredicateComparison<ConditionCheckQuery> {}
 
 /** Negation entry point for a condition-check condition. */
-export interface ConditionCheckNotWhereQuery extends ConditionCheckWhereQuery {
-    /** Negates the next comparison. */
-    not(): ConditionCheckWhereQuery;
-}
+export interface ConditionCheckNotWhereQuery extends ConditionCheckWhereQuery {}
 
 /** Fluent result for an untyped DynamoDB condition check. */
-export interface ConditionCheckQuery extends ConditionFailureReturnQuery<ConditionCheckQuery> {
+export interface ConditionCheckQuery extends ConditionFailureReturnQuery<ConditionCheckQuery>, PredicateGroups<ConditionCheckQuery> {
     /** Adds a condition that must hold for the transaction item. */
-    where(key: string): ConditionCheckNotWhereQuery;
+    where(key: AttributePath): ConditionCheckNotWhereQuery;
     /** Executes the condition check. */
     toPromise<T>(): PromiseFinal<T>;
     /** Executes the condition check and returns its value with DynamoDB request metadata. */
@@ -239,9 +176,9 @@ export interface ConditionCheckQuery extends ConditionFailureReturnQuery<Conditi
 }
 
 /** Fluent operations for a DynamoDB query. */
-export interface Query {
+export interface Query extends PredicateGroups<Query> {
     /** Sets the DynamoDB page size and optional all-page hard limit. */
-    limit(chunkSize: number, hardLimit: number | null): Query;
+    limit(chunkSize: number, hardLimit?: number | null): Query;
     /** Requests a strongly consistent table or local-index read. */
     consistent(): Query;
     /** Returns query results in ascending sort-key order. */
@@ -255,9 +192,9 @@ export interface Query {
     /** Adds a comparison against the table or index sort key. */
     sortKey(attribute: string): QuerySortKeyComparison;
     /** Adds a post-read filter. */
-    where(attribute: string): QueryScanWhereSubQuery;
+    where(attribute: AttributePath): PredicateComparison<Query>;
     /** Restricts returned records to the selected attributes. */
-    select(...attributes: string[]): Query;
+    select(...attributes: AttributePath[]): Query;
     /** Changes the operation to return only the matching-record count. */
     count(): CountFinal;
     /** Fetches one page and returns its continuation cursor. */
@@ -291,7 +228,7 @@ export interface QuerySortKeyComparison {
 }
 
 /** Fluent operations available after selecting a secondary index. */
-export interface SubQuery {
+export interface SubQuery extends PredicateGroups<SubQuery> {
     /** Requests a strongly consistent local-index read. */
     consistent(): SubQuery;
     /** Returns query results in ascending sort-key order. */
@@ -301,9 +238,9 @@ export interface SubQuery {
     /** Requests consumed-capacity metadata in toResponse(). */
     returnCapacity(mode?: ReturnConsumedCapacity): SubQuery;
     /** Adds a post-read filter. */
-    where(attribute: string): QueryScanWhereSubQuery;
+    where(attribute: AttributePath): PredicateComparison<SubQuery>;
     /** Restricts returned records to the selected attributes. */
-    select(...attributes: string[]): SubQuery;
+    select(...attributes: AttributePath[]): SubQuery;
     /** Changes the operation to return only the matching-record count. */
     count(): CountFinal;
     /** Fetches one page and returns its continuation cursor. */
@@ -319,19 +256,20 @@ export interface SubQuery {
 }
 
 /** Fluent operations for a DynamoDB scan. */
-export interface Scan {
+export interface Scan extends PredicateGroups<Scan> {
     /** Sets the DynamoDB page size and optional all-page hard limit. */
-    limit(chunkSize: number, hardLimit: number | null): Scan;
+    limit(chunkSize: number, hardLimit?: number | null): Scan;
     /** Requests a strongly consistent scan. */
     consistent(): Scan;
     /** Configures one segment of a parallel scan. */
     parallel(segment: number, totalSegments: number): Scan;
     /** Requests consumed-capacity metadata in toResponse(). */
     returnCapacity(mode?: ReturnConsumedCapacity): Scan;
+    usingIndex(index: string, kind?: IndexKind): Scan;
     /** Adds a post-read filter. */
-    where(attribute: string): QueryScanWhereSubQuery;
+    where(attribute: AttributePath): PredicateComparison<Scan>;
     /** Restricts returned records to the selected attributes. */
-    select(...attributes: string[]): Scan;
+    select(...attributes: AttributePath[]): Scan;
     /** Changes the operation to return only the matching-record count. */
     count(): CountFinal;
     /** Fetches one page and returns its continuation cursor. */
@@ -347,30 +285,10 @@ export interface Scan {
 }
 
 /** Comparison methods available while building a query or scan filter. */
-export interface QueryScanWhereNotSubQuery {
-    /** Matches records where the selected attribute equals the supplied value. */
-    eq(val: any): SubQuery;
-    /** Matches records where the selected attribute differs from the supplied value. */
-    ne(val: any): SubQuery;
-    /** Matches records where the selected attribute is greater than the supplied value. */
-    gt(num: string | number | Binary): SubQuery;
-    /** Matches records where the selected attribute is greater than or equal to the supplied value. */
-    gte(num: string | number | Binary): SubQuery;
-    /** Matches records where the selected attribute is less than the supplied value. */
-    lt(num: string | number | Binary): SubQuery;
-    /** Matches records where the selected attribute is less than or equal to the supplied value. */
-    lte(num: string | number | Binary): SubQuery;
-    /** Matches records where the selected attribute contains the supplied value. */
-    contains(val: unknown): SubQuery;
-    /** Matches records where the selected attribute equals one supplied value. */
-    in(val: unknown[]): SubQuery;
-}
+export interface QueryScanWhereNotSubQuery extends PredicateComparison<SubQuery> {}
 
 /** Negation entry point for a query or scan filter. */
-export interface QueryScanWhereSubQuery extends QueryScanWhereNotSubQuery {
-    /** Negates the next filter comparison. */
-    not(): QueryScanWhereNotSubQuery;
-}
+export interface QueryScanWhereSubQuery extends QueryScanWhereNotSubQuery {}
 
 /** Terminal operation for an untyped read. */
 export interface Final {
@@ -389,41 +307,19 @@ export interface CountFinal {
 }
 
 /** Comparison methods available while building an update condition. */
-export interface UpdateWhereQuery {
-    /** Requires the selected attribute to exist. */
-    exists(): UpdateSubQuery;
-    /** Requires the selected attribute to equal the supplied value. */
-    eq(val: any): UpdateSubQuery;
-    /** Requires the selected attribute not to equal the supplied value. */
-    ne(val: any): UpdateSubQuery;
-    /** Requires the selected attribute to be greater than the supplied value. */
-    gt(num: string | number | Binary): UpdateSubQuery;
-    /** Requires the selected attribute to be greater than or equal to the supplied value. */
-    gte(num: string | number | Binary): UpdateSubQuery;
-    /** Requires the selected attribute to be less than the supplied value. */
-    lt(num: string | number | Binary): UpdateSubQuery;
-    /** Requires the selected attribute to be less than or equal to the supplied value. */
-    lte(num: string | number | Binary): UpdateSubQuery;
-    /** Requires the selected attribute to contain the supplied value. */
-    contains(val: unknown): UpdateSubQuery;
-    /** Requires the selected attribute to match one of the supplied values. */
-    in(val: unknown[]): UpdateSubQuery;
-}
+export interface UpdateWhereQuery extends PredicateComparison<UpdateSubQuery> {}
 
 /** Negation entry point for an update condition. */
-export interface UpdateNotWhereQuery extends UpdateWhereQuery {
-    /** Negates the next comparison. */
-    not(): UpdateWhereQuery;
-}
+export interface UpdateNotWhereQuery extends UpdateWhereQuery {}
 
 /** Fluent modifiers for an untyped update operation. */
 export interface UpdateQuery {
     /** Sets multiple non-key attributes from a partial document. */
     with(doc: {}): UpdateWithQuery;
     /** Begins a single-attribute SET update. */
-    set(attribute: string): UpdateEqQuery;
+    set(attribute: AttributePath): UpdateEqQuery;
     /** Removes an attribute from the item. */
-    remove(attribute: string): UpdateSubQuery;
+    remove(attribute: AttributePath): UpdateSubQuery;
     /** Begins a numeric or set-membership ADD update. */
     add(attribute: string): AddSubQuery;
     /** Begins a set-membership DELETE update. */
@@ -431,9 +327,9 @@ export interface UpdateQuery {
 }
 
 /** Fluent continuation for an update after an update expression is selected. */
-export interface UpdateSubQuery extends ConditionFailureReturnQuery<UpdateSubQuery>, ConditionalWriteFinal {
+export interface UpdateSubQuery extends ConditionFailureReturnQuery<UpdateSubQuery>, ConditionalWriteFinal, PredicateGroups<UpdateSubQuery> {
     /** Adds a condition to the item before it is updated. */
-    where(key: string): UpdateNotWhereQuery;
+    where(key: AttributePath): UpdateNotWhereQuery;
     /** Returns the updated item in the successful result. */
     returningAllNew(): UpdateSubQuery;
     /** Returns the previous item in the successful result. */
@@ -445,9 +341,9 @@ export interface UpdateSubQuery extends ConditionFailureReturnQuery<UpdateSubQue
     /** Requests local-secondary-index item-collection metrics in toResponse(). */
     returnItemCollectionMetrics(): UpdateSubQuery;
     /** Begins a single-attribute SET update. */
-    set(attribute: string): UpdateEqQuery;
+    set(attribute: AttributePath): UpdateEqQuery;
     /** Removes an attribute from the item. */
-    remove(attribute: string): UpdateSubQuery;
+    remove(attribute: AttributePath): UpdateSubQuery;
     /** Begins a numeric or set-membership ADD update. */
     add(attribute: string): AddSubQuery;
     /** Begins a set-membership DELETE update. */
