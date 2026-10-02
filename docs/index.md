@@ -46,7 +46,7 @@ Thank you to our project sponsors.
 
 ## Environments and version
 
-These documents accompany package version **1.1.0**. The default hosted site is deployed from a stable release tag; the repository's main branch may include unreleased changes. Check your installed version with `npm list @fluentful/orm`.
+These documents accompany package version **1.1.1**. The default hosted site is deployed from a stable release tag; the repository's main branch may include unreleased changes. Check your installed version with `npm list @fluentful/orm`.
 
 The package targets Node.js 20+ and is built as CommonJS. Browser bundlers can consume it; it has no dedicated native browser ESM export. Memory is browser-safe, IndexedDB storage is browser-oriented, and file storage is Node-only. See [environment and storage details](./guides/local-storage.md).
 
