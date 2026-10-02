@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "paths": {
+      "@fluentful/orm": [
+        "./src/index.ts"
+      ]
+    }
+  },
+  "include": [
+    "examples/docs/**/*.ts"
+  ],
+  "exclude": []
+}

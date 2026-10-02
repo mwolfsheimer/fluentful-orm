@@ -49,6 +49,10 @@
     "test:integration": "node --require ts-node/register test/query-builder.integration.test.ts",
     "test:consumer": "node test/consumer/run.cjs",
     "test:browser": "node test/consumer/run.cjs --browser",
+    "test:docs": "npm run build && tsc --project tsconfig.docs.json --noEmit && node scripts/check-docs.cjs && node --test scripts/test-docs-checker.cjs scripts/test-docs-examples.cjs",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "node scripts/check-docs.cjs && vitepress build docs",
+    "docs:preview": "vitepress preview docs",
     "pack:check": "npm pack --dry-run"
   },
   "peerDependencies": {
@@ -61,7 +65,15 @@
     "fake-indexeddb": "^6.2.5",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.3",
-    "zod": "^4.6.5"
+    "zod": "^4.6.5",
+    "vitepress": "1.6.4",
+    "markdown-it": "15.0.2",
+    "github-slugger": "2.0.0"
+  },
+  "overrides": {
+    "vitepress": {
+      "vite": "6.4.3"
+    }
   },
   "publishConfig": {
     "access": "public"

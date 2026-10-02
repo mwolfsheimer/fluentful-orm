@@ -91,6 +91,15 @@ The package currently builds to CommonJS JavaScript and declaration files in `di
 | `node_modules/` | Installed dependencies; never edit or include in changes. |
 | `.idea/` | Local JetBrains IDE metadata; do not use it as application configuration. |
 
+## Documentation and examples
+
+- `docs/` contains local-first tutorials, task guides, conceptual explanations, API reference, and maintainer instructions. Keep these reader needs separate and follow `docs/maintainers/documentation.md`.
+- `docs/.vitepress/config.mts` owns site navigation, local search, and the GitHub Pages base path. Markdown must remain readable on GitHub.
+- `examples/docs/` contains checked public-package examples and expected JSON output. Marked Markdown copies must exactly match their source; AWS examples are typechecked but not executed offline.
+- `scripts/check-docs.cjs` validates local links/anchors, marked examples/output, and the documented package version. `scripts/test-docs-*.cjs` tests the checker and executes local examples.
+- `tsconfig.docs.json` typechecks examples against source. Runtime checks use the built public package.
+- `.github/workflows/docs.yml` deploys the latest stable release only after npm/GitHub versions match. Main/PR CI checks and builds docs without deploying. Pages enablement and repository visibility remain maintainer decisions.
+
 ## Architecture and Data Flow
 
 For a normal operation, follow this path:
@@ -122,6 +131,10 @@ Run commands from the repository root after installing dependencies.
 | `npm run test:persistence` | File and IndexedDB persistence tests directly. |
 | `npm run test:integration` | Shared contract against real DynamoDB. Requires AWS credentials, `AWS_REGION` if not using the default (`eu-west-2` in the runner), and permissions to create/delete temporary tables. |
 | `npm run test:consumer` | Packs the package, installs it in the consumer fixture, typechecks, Webpacks, and checks Node CJS/ESM consumers. Set `ZOD_VERSION` or `AWS_SDK_VERSION` to override fixture versions. |
+| `npm run test:docs` | Builds the package, checks example types/links/drift, and runs local documentation scripts without AWS. |
+| `npm run docs:build` | Checks documentation and builds the searchable VitePress site. |
+| `npm run docs:dev` | Serves documentation with live reload for authors. |
+| `npm run docs:preview` | Serves the built site at `http://localhost:4173/fluentful-orm/`. |
 | `npm run pack:check` | Shows the files that would be included in an npm package. |
 | `npm run clean` | Removes generated root `dist/` using Node filesystem APIs. |
 

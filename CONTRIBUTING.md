@@ -6,6 +6,12 @@ feather-orm is a maintainer-led project. Pull requests and proposals are welcome
 
 For substantial changes, open an issue or design discussion first. Small, focused pull requests are preferred. Contributions should include relevant tests and documentation, and must not introduce unrelated changes.
 
+## Documentation contributions
+
+Follow the [documentation writing and maintenance rules](docs/maintainers/documentation.md). Keep tutorials, task guides, explanations, and reference separate. API changes should update their documentation and checked examples in the same pull request.
+
+Run `npm run test:docs` for runnable examples, link/anchor checks and snippet drift, and `npm run docs:build` for the static site. Use `npm run docs:preview` to inspect the built site at `http://localhost:4173/fluentful-orm/`. The documentation CI job runs these checks without AWS credentials. Publishing is release-aligned and requires maintainer setup; see the [Pages instructions](docs/maintainers/documentation.md#publish-the-documentation-site).
+
 ## Developer Certificate of Origin
 
 All commits must include a DCO sign-off. By signing off, you certify that you have the right to submit the contribution under the Apache-2.0 license. See [DCO.md](DCO.md) for the certificate text.

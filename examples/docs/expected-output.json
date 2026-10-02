@@ -1,0 +1,39 @@
+{
+  "quick-start.ts": {
+    "id": "task-1",
+    "title": "Write the guide",
+    "status": "todo"
+  },
+  "queries.ts": {
+    "projectTitles": [
+      "Write the guide",
+      "Add examples"
+    ],
+    "todoTitles": [
+      "Add examples"
+    ]
+  },
+  "pagination.ts": {
+    "pageSizes": [
+      0,
+      1
+    ],
+    "titles": [
+      "Add examples"
+    ]
+  },
+  "conditions.ts": {
+    "firstApplied": true,
+    "secondApplied": false,
+    "previousStatus": "done"
+  },
+  "transactions.ts": {
+    "firstStatus": "done",
+    "secondStatus": "doing"
+  },
+  "batches.ts": {
+    "completed": 2,
+    "resumable": 0,
+    "unknown": 0
+  }
+}
