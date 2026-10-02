@@ -26,6 +26,64 @@ function fixture(context: TestContext) {
     return {backend, query: () => new QueryBuilder('records', backend.db)};
 }
 
+test('scan continuation uses key order without retaining deleted records', async context => {
+    const {query} = fixture(context);
+    await query().createBatch(['f', 'b', 'd'].map(id => ({id})));
+    const first = await query().scan().page<{id: string}>({limit: 1});
+    assert.deepEqual(first.items, [{id: 'b'}]);
+    await query().delete({id: 'b'}).toPromise();
+    await query().createBatch([{id: 'a'}, {id: 'c'}]);
+    assert.deepEqual((await query().scan().page({cursor: first.cursor})).items, [{id: 'c'}, {id: 'd'}, {id: 'f'}]);
+    await query().create({id: 'b', recreated: true}).toPromise();
+    assert.deepEqual((await query().scan().page({cursor: first.cursor})).items, [{id: 'c'}, {id: 'd'}, {id: 'f'}]);
+    assert.deepEqual((await query().scan().page({cursor: {id: 'z'}})).items, []);
+    await assert.rejects(query().scan().page({cursor: {wrong: 'b'}}), {name: 'ValidationException'});
+    await assert.rejects(query().scan().page({cursor: {id: 1}}), {name: 'ValidationException'});
+});
+
+test('parallel scan continuation validates the original segment after deletion', async context => {
+    const {query} = fixture(context);
+    await query().createBatch(Array.from({length: 12}, (_, id) => ({id: String(id)})));
+    const first = await query().scan().parallel(0, 2).page<{id: string}>({limit: 1});
+    assert.ok(first.cursor);
+    await query().delete({id: first.items[0].id}).toPromise();
+    const expected = await query().scan().parallel(0, 2).toPromise();
+    assert.deepEqual((await query().scan().parallel(0, 2).page({cursor: first.cursor})).items, expected);
+    await assert.rejects(query().scan().parallel(1, 2).page({cursor: first.cursor}), /requested segment/);
+});
+
+test('changed multi-key index cursors compare numeric, binary and base-table tie breakers', async context => {
+    const backend = createEngine.memory();
+    context.after(() => backend.close());
+    const index = {name: 'multi', kind: 'global', partition: ['region', 'tenant'], sort: ['rank', 'token']} as const;
+    await QueryBuilder.createTable({
+        name: 'records', key: {partition: 'id', sort: 'part'},
+        attributes: {id: 'N', part: 'B', region: 'S', tenant: 'N', rank: 'N', token: 'B'},
+        indexes: {multi: {kind: index.kind, partition: index.partition, sort: index.sort}}
+    }, backend.db);
+    const query = () => new QueryBuilder('records', backend.db);
+    const documents = [
+        {id: 10, part: new Uint8Array([2]), rank: 2, token: new Uint8Array([1])},
+        {id: 2, part: new Uint8Array([2]), rank: 2, token: new Uint8Array([1])},
+        {id: 2, part: new Uint8Array([1]), rank: 2, token: new Uint8Array([1])},
+        {id: 1, part: new Uint8Array([1]), rank: 10, token: new Uint8Array([0])},
+        {id: 3, part: new Uint8Array([1]), rank: 2, token: new Uint8Array([2])}
+    ].map(item => ({...item, region: 'r', tenant: 1}));
+    await query().createBatch(documents);
+    const read = () => query().query({region: 'r', tenant: 1}, index);
+    const ordered = [documents[2], documents[1], documents[0], documents[4], documents[3]];
+    assert.deepEqual(await read().toPromise(), ordered);
+    const first = await read().page({limit: 1});
+    await query().update({id: 2, part: new Uint8Array([1])}).set('region').eq('moved').toPromise();
+    assert.deepEqual((await read().page({cursor: first.cursor})).items, ordered.slice(1));
+    const reverse = await read().descending().page({limit: 1});
+    await query().delete({id: 1, part: new Uint8Array([1])}).toPromise();
+    assert.deepEqual((await read().descending().page({cursor: reverse.cursor})).items, ordered.slice(1, -1).reverse());
+    const scan = await query().scan().usingIndex('multi').page({limit: 1});
+    await query().update({id: 2, part: new Uint8Array([1])}).remove('tenant').toPromise();
+    assert.deepEqual((await query().scan().usingIndex('multi').page({cursor: scan.cursor})).items, ordered.slice(1, -1));
+});
+
 test('rejects malformed SET branches and nested arithmetic atomically', async context => {
     const {backend, query} = fixture(context);
     await query().create({id: 'one', count: 1}).toPromise();

@@ -138,7 +138,7 @@ Use the narrowest relevant check first. After changing request construction, run
 - Use `Uint8Array` in public types and examples for binary values. Do not expose `Buffer` in declarations or require the Node global for normal operations; `test/consumer/run.cjs` checks this.
 - `npm run test:consumer` checks packaging and bundling only. `npm run test:browser` additionally executes the IndexedDB/typed API fixture in Chromium at desktop and mobile viewport sizes. Do not claim browser execution from the consumer command alone.
 - Recoverable batches preserve completed, explicitly unprocessed, never-submitted, and uncertain work separately. Only known-unprocessed and never-submitted inputs belong in safe resume payloads; do not retry uncertain writes automatically.
-- Memory supports deterministic GSI lifecycle and ordered base-query cursor continuation after deletion, but not throughput, TTL expiry, byte limits, eventual consistency, or distributed conflict simulation. AWS probes with no observed target event are inconclusive, not parity evidence.
+- Memory supports deterministic GSI lifecycle and key-based table/index query/scan continuation after cursor deletion or index-key changes. Memory scan order and index tie-breaking are deterministic, not AWS ordering guarantees. It does not simulate throughput, TTL expiry, byte limits, eventual consistency, or distributed conflicts. AWS probes with no observed target event are inconclusive, not parity evidence.
 
 ## API Design Rules
 

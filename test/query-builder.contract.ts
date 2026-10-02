@@ -177,6 +177,102 @@ export const queryBuilderContract = (backendName: string, dynamoDBClient: Dynamo
         assert.deepEqual(previous.items.map(item => item.sort), [3, 1, 0]);
     });
 
+    test('resumes index queries after cursor deletion, key movement and sparse exit', async context => {
+        const name = `query-builder-changed-index-${suffix}`;
+        await QueryBuilder.createTable({
+            name, key: {partition: 'id'}, attributes: {id: 'S', category: 'S', rank: 'N'},
+            indexes: {category: {kind: 'global', partition: 'category', sort: 'rank'}}
+        }, dynamoDBClient);
+        context.after(async () => {
+            await QueryBuilder.deleteTable(name, dynamoDBClient);
+            await waitUntilTableNotExists({client: dynamoDBClient, maxWaitTime: 60}, {TableName: name});
+        });
+        await waitUntilTableExists({client: dynamoDBClient, maxWaitTime: 60}, {TableName: name});
+        const records = () => new QueryBuilder(name, dynamoDBClient);
+        for (const descending of [false, true]) {
+            for (const mutation of ['delete', 'move-before', 'move-after', 'exit'] as const) {
+                const category = `${descending}-${mutation}`;
+                const documents = [1, 1, 2, 3, 4].map((rank, index) => ({id: `${category}-${index}`, category, rank}));
+                await records().createBatch(documents);
+                const read = () => {
+                    const chain = records().query({category}).usingIndex('category');
+                    return descending ? chain.descending() : chain;
+                };
+                assert.equal((await queryUntilCount(() => read().toPromise<unknown[]>(), 5)).length, 5);
+                const first = await read().page<{id: string; rank: number}>({limit: 1});
+                assert.ok(first.cursor);
+                const key = {id: first.items[0].id};
+                if (mutation === 'delete') await records().delete(key).toPromise();
+                else if (mutation === 'exit') await records().update(key).remove('category').toPromise();
+                else {
+                    const rank = (mutation === 'move-after') !== descending ? 10 : 0;
+                    await records().update(key).set('rank').eq(rank).toPromise();
+                    assert.equal((await queryUntilCount(async () =>
+                        (await read().toPromise<{id: string; rank: number}[]>()).filter(item => item.id === key.id && item.rank === rank), 1)).length, 1);
+                }
+                const expected = documents.filter(item => mutation === 'move-after' || item.id !== key.id).map(item => item.id).sort();
+                const remaining = await queryUntilCount(
+                    () => read().page<{id: string}>({cursor: first.cursor}).then(page => page.items), expected.length);
+                assert.deepEqual(remaining.map(item => item.id).sort(), expected);
+                const streamed: string[] = [];
+                for await (const page of read().pages<{id: string}>({limit: 1, cursor: first.cursor})) {
+                    streamed.push(...page.items.map(item => item.id));
+                }
+                assert.deepEqual(streamed.sort(), expected);
+            }
+        }
+    });
+
+    test('resumes table and index scans after cursor deletion or sparse exit, including segments', async context => {
+        const name = `query-builder-changed-scan-${suffix}`;
+        await QueryBuilder.createTable({
+            name, key: {partition: 'id'}, attributes: {id: 'S', category: 'S', rank: 'N'},
+            indexes: {category: {kind: 'global', partition: 'category', sort: 'rank'}}
+        }, dynamoDBClient);
+        context.after(async () => {
+            await QueryBuilder.deleteTable(name, dynamoDBClient);
+            await waitUntilTableNotExists({client: dynamoDBClient, maxWaitTime: 60}, {TableName: name});
+        });
+        await waitUntilTableExists({client: dynamoDBClient, maxWaitTime: 60}, {TableName: name});
+        const records = () => new QueryBuilder(name, dynamoDBClient);
+        const documents = Array.from({length: 24}, (_, rank) => ({id: `record-${rank}`, category: 'c', rank}));
+        for (const indexed of [false, true]) {
+            for (const parallel of [false, true]) {
+                for (const mutation of indexed ? ['delete', 'exit'] as const : ['delete'] as const) {
+                    await records().createBatch(documents);
+                    const read = (segment?: number) => {
+                        const chain = records().scan();
+                        if (indexed) chain.usingIndex('category');
+                        else chain.consistent();
+                        if (segment !== undefined) chain.parallel(segment, 2);
+                        return chain;
+                    };
+                    assert.equal((await queryUntilCount(() => read().toPromise<unknown[]>(), documents.length)).length, documents.length);
+                    let segment = parallel ? 0 : undefined;
+                    let before = await read(segment).toPromise<{id: string}[]>();
+                    if (parallel && before.length < 2) {
+                        segment = 1;
+                        before = await read(segment).toPromise<{id: string}[]>();
+                    }
+                    assert.ok(before.length >= 2);
+                    const first = await read(segment).page<{id: string}>({limit: 1});
+                    assert.ok(first.cursor);
+                    const key = {id: first.items[0].id};
+                    if (mutation === 'delete') await records().delete(key).toPromise();
+                    else await records().update(key).remove('category').toPromise();
+                    assert.equal((await queryUntilCount(() => read().toPromise<unknown[]>(), documents.length - 1)).length, documents.length - 1);
+                    const remaining: string[] = [];
+                    for await (const page of read(segment).pages<{id: string}>({limit: 2, cursor: first.cursor})) {
+                        remaining.push(...page.items.map(item => item.id));
+                    }
+                    assert.deepEqual(remaining.sort(), before.filter(item => item.id !== key.id).map(item => item.id).sort());
+                    await records().deleteBatch(documents.map(({id}) => ({id})));
+                    assert.equal((await queryUntilCount(() => read().toPromise<unknown[]>(), 0)).length, 0);
+                }
+            }
+        }
+    });
+
     test('evaluates structured SET operands against the pre-update record', async context => {
         const query = () => new QueryBuilder(tableName, dynamoDBClient);
         const key = {id: 'structured-update-contract'};

@@ -885,21 +885,29 @@ class InMemoryDynamoDB {
             (item) => schema.every((key) => item[key.AttributeName!] !== undefined)
                 && (!query || this.matches(queryInput.KeyConditionExpression, item, queryInput))
         );
-        if (query) {
-            const sorts = schema.filter(key => key.KeyType === 'RANGE');
-            if (sorts.length) {
-                items.sort((left, right) => {
-                    for (const sort of sorts) {
-                        const order = compare(left[sort.AttributeName!], right[sort.AttributeName!]) || 0;
-                        if (order) return order;
-                    }
-                    return 0;
-                });
+        // A total key order makes continuation independent of the cursor record's lifetime.
+        // Scan order and index tie-breaking are deterministic here, not AWS ordering guarantees.
+        const tableSchema = table.description.KeySchema || [];
+        const orderedKeys = [...new Set([
+            ...(!query ? schema.filter(key => key.KeyType === 'HASH') : []),
+            ...schema.filter(key => key.KeyType === 'RANGE'),
+            ...tableSchema.filter(key => key.KeyType === 'HASH'),
+            ...tableSchema.filter(key => key.KeyType === 'RANGE')
+        ].map(key => key.AttributeName!))];
+        const comparePosition = (left: Document, right: Document): number => {
+            for (const name of orderedKeys) {
+                const order = compare(left[name], right[name]) || 0;
+                if (order) return query && queryInput.ScanIndexForward === false ? -order : order;
             }
-            if (queryInput.ScanIndexForward === false) {
-                items.reverse();
-            }
-        }
+            return 0;
+        };
+        items.sort(comparePosition);
+        const segmentFor = (item: Document, total: number): number => {
+            const key = this.key(table, item);
+            let hash = 0;
+            for (let index = 0; index < key.length; index++) hash = (hash * 31 + key.charCodeAt(index)) >>> 0;
+            return hash % total;
+        };
         if (!query) {
             const scan = input as ScanCommandInput;
             if ((scan.Segment === undefined) !== (scan.TotalSegments === undefined)
@@ -909,12 +917,7 @@ class InMemoryDynamoDB {
                 validation('Invalid parallel scan segment');
             }
             if (scan.Segment !== undefined) {
-                items = items.filter((item) => {
-                    const key = this.key(table, item);
-                    let hash = 0;
-                    for (let index = 0; index < key.length; index++) hash = (hash * 31 + key.charCodeAt(index)) >>> 0;
-                    return hash % scan.TotalSegments! === scan.Segment;
-                });
+                items = items.filter(item => segmentFor(item, scan.TotalSegments!) === scan.Segment);
             }
         }
         if (input.ExclusiveStartKey !== undefined) {
@@ -924,19 +927,11 @@ class InMemoryDynamoDB {
             if (Object.keys(cursor).length !== cursorSchema.size) validation('Cursor must contain all table and index keys');
             cursorSchema.forEach((key) => this.validateKeyAttribute(table, key, cursor[key.AttributeName!]));
             if (query) this.validateQuery(table, schema, queryInput, cursor);
-            const cursorKey = this.key(table, cursor);
-            const position = items.findIndex((item) => this.key(table, item) === cursorKey
-                && Array.from(cursorSchema.keys()).every((name) => equalDynamoValues(item[name], cursor[name])));
-            if (position === -1) {
-                if (!query || indexRequest) validation('In-memory scan/index cursor must identify an existing matching record');
-                const sort = schema.find(key => key.KeyType === 'RANGE');
-                items = sort === undefined ? [] : items.filter(item => {
-                    const order = compare(item[sort.AttributeName!], cursor[sort.AttributeName!])!;
-                    return queryInput.ScanIndexForward === false ? order < 0 : order > 0;
-                });
-            } else {
-                items = items.slice(position + 1);
+            const scan = input as ScanCommandInput;
+            if (!query && scan.Segment !== undefined && segmentFor(cursor, scan.TotalSegments!) !== scan.Segment) {
+                validation('Scan cursor must belong to the requested segment');
             }
+            items = items.filter(item => comparePosition(item, cursor) > 0);
         }
         const limit = input.Limit === undefined ? items.length : input.Limit;
         if (input.Limit !== undefined && (!Number.isInteger(limit) || limit <= 0)) {

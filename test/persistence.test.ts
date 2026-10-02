@@ -18,6 +18,38 @@ function deleteIndexedDB(name: string): Promise<void> {
 }
 
 for (const storage of ['file', 'browser'] as const) {
+    test(`${storage} resumes deleted scan and index cursors after reopening`, async context => {
+        const directory = await mkdtemp(join(tmpdir(), 'fluentful-cursors-'));
+        const name = `fluentful-cursors-${Date.now()}-${Math.random()}`;
+        const engines: Array<{close(): Promise<void>}> = [];
+        context.after(async () => {
+            await Promise.all(engines.map(engine => engine.close()));
+            await rm(directory, {recursive: true, force: true});
+            if (storage === 'browser') await deleteIndexedDB(name);
+        });
+        const open = () => {
+            const engine = storage === 'file' ? createEngine.file(join(directory, 'state.json')) : createEngine.browser(name);
+            engines.push(engine);
+            return engine;
+        };
+        const first = open();
+        await QueryBuilder.createTable({
+            name: 'records', key: {partition: 'id'}, attributes: {id: 'S', category: 'S', rank: 'N'},
+            indexes: {category: {kind: 'global', partition: 'category', sort: 'rank'}}
+        }, first.db);
+        const records = () => new QueryBuilder('records', first.db);
+        await records().createBatch(['c', 'a', 'b'].map(id => ({id, category: 'c', rank: 1})));
+        const scan = await records().scan().page({limit: 1});
+        const index = await records().query({category: 'c'}).usingIndex('category').page({limit: 1});
+        await records().delete({id: 'a'}).toPromise();
+        await first.close();
+        const restored = open();
+        const read = () => new QueryBuilder('records', restored.db);
+        const expected = ['b', 'c'].map(id => ({id, category: 'c', rank: 1}));
+        assert.deepEqual((await read().scan().page({cursor: scan.cursor})).items, expected);
+        assert.deepEqual((await read().query({category: 'c'}).usingIndex('category').page({cursor: index.cursor})).items, expected);
+    });
+
     test(`${storage} preserves ordered multi-attribute index metadata`, async context => {
         const directory = await mkdtemp(join(tmpdir(), 'fluentful-multi-'));
         const name = `fluentful-multi-${Date.now()}-${Math.random()}`;
