@@ -1,5 +1,16 @@
 const orm = require("@fluentful/orm");
 const { z } = require("zod");
+const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
+const path = require("node:path");
+
+const packageRoot = path.dirname(path.dirname(require.resolve("@fluentful/orm")));
+const metadata = JSON.parse(readFileSync(path.join(packageRoot, "package.json"), "utf8"));
+assert.equal(metadata.author, "Marco Wolfsheimer");
+assert.equal(metadata.license, "Apache-2.0");
+for (const file of ["LICENSE", "NOTICE", "README.md"]) {
+  assert.match(readFileSync(path.join(packageRoot, file), "utf8"), /Copyright 2026 Marco Wolfsheimer/);
+}
 for (const name of ["transactGet", "typedReadTransaction", "literal", "ifNotExists", "listAppend", "plus", "minus",
   "listTablePage", "waitForTable", "waitForTableDeleted", "updateTable", "configureTimeToLive", "describeTimeToLive"]) {
   if (typeof orm[name] !== "function") throw new Error(`Missing CommonJS export: ${name}`);

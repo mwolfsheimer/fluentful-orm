@@ -197,7 +197,8 @@ export default defineConfig({
             text: 'Suggest an edit on GitHub (main branch)'
         },
         footer: {
-            message: 'Released under the Apache-2.0 licence.'
+            message: 'Released under the Apache-2.0 licence.',
+            copyright: 'Copyright 2026 Marco Wolfsheimer'
         }
     }
 });

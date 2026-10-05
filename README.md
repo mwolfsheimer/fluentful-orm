@@ -107,7 +107,9 @@ Thank you to our project sponsors.
 
 ## License and contributions
 
-Apache-2.0. See [LICENSE](LICENSE), [contribution guidance](CONTRIBUTING.md), and [DCO sign-off requirements](DCO.md).
+Copyright 2026 Marco Wolfsheimer.
+
+Licensed under Apache-2.0. See [LICENSE](LICENSE), [attribution notice](NOTICE), [contribution guidance](CONTRIBUTING.md), and [DCO sign-off requirements](DCO.md).
 
 Report problems through [GitHub issues](https://github.com/mwolfsheimer/fluentful-orm/issues), removing credentials and personal data from examples and logs.
 

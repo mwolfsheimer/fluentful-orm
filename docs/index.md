@@ -46,8 +46,8 @@ Thank you to our project sponsors.
 
 ## Environments and version
 
-These documents accompany package version **1.1.1**. The default hosted site is deployed from a stable release tag; the repository's main branch may include unreleased changes. Check your installed version with `npm list @fluentful/orm`.
+These documents accompany package version **1.1.2**. The default hosted site is deployed from a stable release tag; the repository's main branch may include unreleased changes. Check your installed version with `npm list @fluentful/orm`.
 
 The package targets Node.js 20+ and is built as CommonJS. Browser bundlers can consume it; it has no dedicated native browser ESM export. Memory is browser-safe, IndexedDB storage is browser-oriented, and file storage is Node-only. See [environment and storage details](./guides/local-storage.md).
 
-This is an Apache-2.0 project. See the [licence](https://github.com/mwolfsheimer/fluentful-orm/blob/main/LICENSE), [contribution process](https://github.com/mwolfsheimer/fluentful-orm/blob/main/CONTRIBUTING.md), and [issue tracker](https://github.com/mwolfsheimer/fluentful-orm/issues).
+Copyright 2026 Marco Wolfsheimer. This is an Apache-2.0 project. See the [licence](https://github.com/mwolfsheimer/fluentful-orm/blob/main/LICENSE), [attribution notice](https://github.com/mwolfsheimer/fluentful-orm/blob/main/NOTICE), [contribution process](https://github.com/mwolfsheimer/fluentful-orm/blob/main/CONTRIBUTING.md), and [issue tracker](https://github.com/mwolfsheimer/fluentful-orm/issues).

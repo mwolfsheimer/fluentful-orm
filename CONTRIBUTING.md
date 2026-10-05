@@ -2,7 +2,7 @@
 
 ## Project governance
 
-feather-orm is a maintainer-led project. Pull requests and proposals are welcome, but submitting one does not create an obligation to review, accept, merge, or release it. The maintainer has final authority over project direction, scope, releases, and merges.
+`@fluentful/orm` is a maintainer-led project maintained by Marco Wolfsheimer. Pull requests and proposals are welcome, but submitting one does not create an obligation to review, accept, merge, or release it. The maintainer has final authority over project direction, scope, releases, and merges.
 
 For substantial changes, open an issue or design discussion first. Small, focused pull requests are preferred. Contributions should include relevant tests and documentation, and must not introduce unrelated changes.
 
