@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
-import {describe, test} from 'node:test';
-import {DynamoDBClient} from '@aws-sdk/client-dynamodb';
-import {QueryBuilder} from '../src/query-builder';
-import {QuerySerializer} from '../src/query-serializer';
-import {Quewe} from '../src/quewe';
-import {BatchRetryError, QueryExecutor} from '../src/query-executor';
-import {createFakeDynamoDB} from './fake-dynamodb';
-import {getEventListeners} from 'node:events';
-import {abortableDelay} from '../src/execution-options';
+import { describe, test } from 'node:test';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { QueryBuilder } from '../src/query-builder';
+import { QuerySerializer } from '../src/query-serializer';
+import { Quewe } from '../src/quewe';
+import { BatchRetryError, QueryExecutor } from '../src/query-executor';
+import { createFakeDynamoDB } from './fake-dynamodb';
+import { getEventListeners } from 'node:events';
+import { abortableDelay } from '../src/execution-options';
 
 describe('query - QueryBuilder pagination and batches', () => {
     test('removes backoff listeners on abort and normal completion', async () => {
@@ -16,7 +16,7 @@ describe('query - QueryBuilder pagination and batches', () => {
         const waiting = abortableDelay(10000, controller.signal);
         assert.equal(getEventListeners(controller.signal, 'abort').length, 1);
         controller.abort(reason);
-        await assert.rejects(waiting, error => error === reason);
+        await assert.rejects(waiting, (error) => error === reason);
         assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
         const completed = new AbortController();
         await abortableDelay(0, completed.signal);
@@ -25,12 +25,15 @@ describe('query - QueryBuilder pagination and batches', () => {
     test('retains safe recovery work when cancelled before an unprocessed retry', async () => {
         const controller = new AbortController();
         const reason = new Error('stop retries');
-        const fake = createFakeDynamoDB(command => {
+        const fake = createFakeDynamoDB((command) => {
             controller.abort(reason);
-            return {UnprocessedItems: {test: command.input.RequestItems.test.slice(10)}};
+            return { UnprocessedItems: { test: command.input.RequestItems.test.slice(10) } };
         });
-        const keys = Array.from({length: 60}, (_, index) => ({id: String(index)}));
-        const result = await new QueryBuilder('test', fake.db).deleteBatchResult(keys, {concurrency: 1, signal: controller.signal});
+        const keys = Array.from({ length: 60 }, (_, index) => ({ id: String(index) }));
+        const result = await new QueryBuilder('test', fake.db).deleteBatchResult(keys, {
+            concurrency: 1,
+            signal: controller.signal
+        });
         assert.equal(result.completed.length, 10);
         assert.equal(result.unprocessed.length, 15);
         assert.equal(result.notSubmitted.length, 35);
@@ -41,11 +44,16 @@ describe('query - QueryBuilder pagination and batches', () => {
     });
 
     test('counts missing and duplicate reads as completed while preserving service result order', async () => {
-        const fake = createFakeDynamoDB(() => ({Responses: {test: [QuerySerializer.serialiseMap({id: 'found'})]}}));
-        const keys = [{id: 'missing'}, {id: 'found'}, {id: 'found'}];
+        const fake = createFakeDynamoDB(() => ({
+            Responses: { test: [QuerySerializer.serialiseMap({ id: 'found' })] }
+        }));
+        const keys = [{ id: 'missing' }, { id: 'found' }, { id: 'found' }];
         const outcome = await new QueryBuilder('test', fake.db).getBatchResult(keys);
-        assert.deepEqual(outcome.completed.map(work => work.index), [0, 1, 2]);
-        assert.deepEqual(outcome.results, [{id: 'found'}]);
+        assert.deepEqual(
+            outcome.completed.map((work) => work.index),
+            [0, 1, 2]
+        );
+        assert.deepEqual(outcome.results, [{ id: 'found' }]);
         assert.deepEqual(outcome.resumable, []);
         assert.equal(fake.inputs[0].RequestItems.test.Keys.length, 2);
     });
@@ -53,14 +61,21 @@ describe('query - QueryBuilder pagination and batches', () => {
     test('waits for in-flight chunks and retains their completed work after another chunk fails', async () => {
         const failure = new Error('uncertain chunk');
         let release: () => void = () => {};
-        const blocked = new Promise<void>(resolve => { release = resolve; });
+        const blocked = new Promise<void>((resolve) => {
+            release = resolve;
+        });
         const fake = createFakeDynamoDB(async (_command, attempt) => {
-            if (attempt === 1) { await blocked; return {}; }
+            if (attempt === 1) {
+                await blocked;
+                return {};
+            }
             release();
             throw failure;
         });
         const outcome = await new QueryBuilder('test', fake.db).createBatchResult(
-            Array.from({length: 50}, (_, index) => ({id: String(index)})), {concurrency: 2});
+            Array.from({ length: 50 }, (_, index) => ({ id: String(index) })),
+            { concurrency: 2 }
+        );
         assert.equal(outcome.completed.length, 25);
         assert.equal(outcome.unknown.length, 25);
         assert.equal(outcome.errors[0], failure);
@@ -73,8 +88,8 @@ describe('query - QueryBuilder pagination and batches', () => {
             if (attempt === 2) throw failure;
             return {};
         });
-        const documents = Array.from({length: 60}, (_, index) => ({id: String(index)}));
-        const outcome = await new QueryBuilder('test', fake.db).createBatchResult(documents, {concurrency: 1});
+        const documents = Array.from({ length: 60 }, (_, index) => ({ id: String(index) }));
+        const outcome = await new QueryBuilder('test', fake.db).createBatchResult(documents, { concurrency: 1 });
         assert.equal(outcome.completed.length, 25);
         assert.equal(outcome.unknown.length, 25);
         assert.equal(outcome.notSubmitted.length, 10);
@@ -89,58 +104,76 @@ describe('query - QueryBuilder pagination and batches', () => {
     });
 
     test('binds cancellation once and forwards the original signal outside request data', async () => {
-        const invalid = new QueryBuilder('test', createFakeDynamoDB(() => ({Items: []})).db).scan();
-        assert.throws(() => invalid.page({limit: 0, signal: new AbortController().signal}), /positive integer/);
-        await invalid.page({signal: new AbortController().signal});
+        const invalid = new QueryBuilder('test', createFakeDynamoDB(() => ({ Items: [] })).db).scan();
+        assert.throws(() => invalid.page({ limit: 0, signal: new AbortController().signal }), /positive integer/);
+        await invalid.page({ signal: new AbortController().signal });
         const controller = new AbortController();
-        const fake = createFakeDynamoDB(() => ({Items: []}));
+        const fake = createFakeDynamoDB(() => ({ Items: [] }));
         const query = new QueryBuilder('test', fake.db).scan();
-        const promise = query.toPromise({signal: controller.signal});
+        const promise = query.toPromise({ signal: controller.signal });
         assert.equal(query.toPromise(), promise);
-        assert.equal(query.toPromise({signal: controller.signal}), promise);
-        assert.throws(() => query.toResponse({signal: new AbortController().signal}), /options cannot change/);
+        assert.equal(query.toPromise({ signal: controller.signal }), promise);
+        assert.throws(() => query.toResponse({ signal: new AbortController().signal }), /options cannot change/);
         await promise;
         assert.equal(fake.options[0].abortSignal, controller.signal);
         assert.equal(fake.inputs[0].signal, undefined);
         const aborted = new AbortController();
         const reason = new Error('stopped');
         aborted.abort(reason);
-        await assert.rejects(new QueryBuilder('test', fake.db).get({id: 'one'}).toPromise({signal: aborted.signal}),
-            error => error === reason);
+        await assert.rejects(
+            new QueryBuilder('test', fake.db).get({ id: 'one' }).toPromise({ signal: aborted.signal }),
+            (error) => error === reason
+        );
         assert.equal(fake.inputs.length, 1);
-        await assert.rejects(new QueryBuilder('test', fake.db).createBatch([], {signal: aborted.signal}),
-            error => error === reason);
+        await assert.rejects(
+            new QueryBuilder('test', fake.db).createBatch([], { signal: aborted.signal }),
+            (error) => error === reason
+        );
     });
 
     test('stops between yielded items and before retrying unprocessed work', async () => {
         const controller = new AbortController();
-        const fake = createFakeDynamoDB(() => ({Items: [
-            QuerySerializer.serialiseMap({id: 'one'}), QuerySerializer.serialiseMap({id: 'two'})
-        ]}));
-        const iterator = new QueryBuilder('test', fake.db).scan().items({signal: controller.signal})[Symbol.asyncIterator]();
-        assert.deepEqual((await iterator.next()).value, {id: 'one'});
+        const fake = createFakeDynamoDB(() => ({
+            Items: [QuerySerializer.serialiseMap({ id: 'one' }), QuerySerializer.serialiseMap({ id: 'two' })]
+        }));
+        const iterator = new QueryBuilder('test', fake.db)
+            .scan()
+            .items({ signal: controller.signal })
+            [Symbol.asyncIterator]();
+        assert.deepEqual((await iterator.next()).value, { id: 'one' });
         const reason = new Error('stop iterator');
         controller.abort(reason);
-        await assert.rejects(iterator.next(), error => error === reason);
+        await assert.rejects(iterator.next(), (error) => error === reason);
         assert.equal(fake.inputs.length, 1);
 
         const retryController = new AbortController();
-        const retryFake = createFakeDynamoDB(command => {
+        const retryFake = createFakeDynamoDB((command) => {
             retryController.abort(reason);
-            return {UnprocessedItems: command.input.RequestItems};
+            return { UnprocessedItems: command.input.RequestItems };
         });
-        await assert.rejects(new QueryBuilder('test', retryFake.db).createBatch(
-            Array.from({length: 60}, (_, index) => ({id: String(index)})),
-            {concurrency: 1, signal: retryController.signal}), error => error === reason);
+        await assert.rejects(
+            new QueryBuilder('test', retryFake.db).createBatch(
+                Array.from({ length: 60 }, (_, index) => ({ id: String(index) })),
+                { concurrency: 1, signal: retryController.signal }
+            ),
+            (error) => error === reason
+        );
         assert.equal(retryFake.inputs.length, 1);
     });
 
     test('preserves page-local evaluation metadata without inventing absent counts', async () => {
-        const capacity = {TableName: 'test', CapacityUnits: 2};
-        const fake = createFakeDynamoDB((_command, attempt) => attempt === 1
-            ? {Items: [], Count: 0, ScannedCount: 8, ConsumedCapacity: capacity,
-                LastEvaluatedKey: QuerySerializer.serialiseMap({id: 'next'})}
-            : {Items: []});
+        const capacity = { TableName: 'test', CapacityUnits: 2 };
+        const fake = createFakeDynamoDB((_command, attempt) =>
+            attempt === 1
+                ? {
+                      Items: [],
+                      Count: 0,
+                      ScannedCount: 8,
+                      ConsumedCapacity: capacity,
+                      LastEvaluatedKey: QuerySerializer.serialiseMap({ id: 'next' })
+                  }
+                : { Items: [] }
+        );
         const iterator = new QueryBuilder('test', fake.db).scan().returnCapacity().pages()[Symbol.asyncIterator]();
         const first = (await iterator.next()).value;
         assert.equal(first.count, 0);
@@ -148,19 +181,20 @@ describe('query - QueryBuilder pagination and batches', () => {
         assert.deepEqual(first.consumedCapacity, capacity);
         first.consumedCapacity.CapacityUnits = 99;
         assert.equal(capacity.CapacityUnits, 2);
-        assert.deepEqual((await iterator.next()).value, {items: [], cursor: null});
+        assert.deepEqual((await iterator.next()).value, { items: [], cursor: null });
     });
 
     test('treats empty service cursors as terminal in every read mode', async () => {
         for (const method of ['page', 'pages', 'items', 'count', 'all']) {
             const fake = createFakeDynamoDB((_command, attempt) => {
                 assert.equal(attempt, 1);
-                return {Items: [], Count: 0, LastEvaluatedKey: {}};
+                return { Items: [], Count: 0, LastEvaluatedKey: {} };
             });
             const query = new QueryBuilder('test', fake.db).scan();
-            if (method === 'page') assert.deepEqual(await query.page(), {items: [], cursor: null, count: 0});
+            if (method === 'page') assert.deepEqual(await query.page(), { items: [], cursor: null, count: 0 });
             else if (method === 'pages' || method === 'items') {
-                for await (const _entry of query[method]()) {}
+                for await (const _entry of query[method]()) {
+                }
             } else if (method === 'count') assert.equal(await query.count().toPromise(), 0);
             else assert.deepEqual(await query.toPromise(), []);
             assert.equal(fake.inputs.length, 1);
@@ -169,16 +203,17 @@ describe('query - QueryBuilder pagination and batches', () => {
 
     test('deduplicates equivalent binary keys across binary prototypes', async () => {
         const fake = createFakeDynamoDB();
-        await new QueryBuilder('test', fake.db).getBatch([{id: Buffer.from([1, 2])}, {id: new Uint8Array([1, 2])}]);
+        await new QueryBuilder('test', fake.db).getBatch([{ id: Buffer.from([1, 2]) }, { id: new Uint8Array([1, 2]) }]);
         assert.equal(fake.inputs[0].RequestItems.test.Keys.length, 1);
     });
 
     test('snapshots retained builders before lazy iteration', async () => {
-        const fake = createFakeDynamoDB(() => ({Items: []}));
+        const fake = createFakeDynamoDB(() => ({ Items: [] }));
         const query = new QueryBuilder('test', fake.db).scan().limit(1);
         const pages = query.pages();
         query.limit(99).select('changed');
-        for await (const _page of pages) {}
+        for await (const _page of pages) {
+        }
         assert.equal(fake.inputs[0].Limit, 1);
         assert.equal(fake.inputs[0].ProjectionExpression, undefined);
     });
@@ -187,33 +222,33 @@ describe('query - QueryBuilder pagination and batches', () => {
         const fake = createFakeDynamoDB((command, attempt) => {
             if (attempt === 1) {
                 return {
-                    Items: [QuerySerializer.serialiseMap({id: 'page-a'})],
-                    LastEvaluatedKey: QuerySerializer.serialiseMap({id: 'page-a'})
+                    Items: [QuerySerializer.serialiseMap({ id: 'page-a' })],
+                    LastEvaluatedKey: QuerySerializer.serialiseMap({ id: 'page-a' })
                 };
             }
 
             assert.equal(command.input.ExclusiveStartKey.id.S, 'page-a');
-            return {Items: [QuerySerializer.serialiseMap({id: 'page-b'})]};
+            return { Items: [QuerySerializer.serialiseMap({ id: 'page-b' })] };
         });
 
-        const first = await new QueryBuilder('test', fake.db).scan().page<any>({limit: 1});
-        const second = await new QueryBuilder('test', fake.db).scan().page<any>({limit: 1, cursor: first.cursor});
+        const first = await new QueryBuilder('test', fake.db).scan().page<any>({ limit: 1 });
+        const second = await new QueryBuilder('test', fake.db).scan().page<any>({ limit: 1, cursor: first.cursor });
 
-        assert.deepEqual(first, {items: [{id: 'page-a'}], cursor: {id: 'page-a'}});
-        assert.deepEqual(second, {items: [{id: 'page-b'}], cursor: null});
+        assert.deepEqual(first, { items: [{ id: 'page-a' }], cursor: { id: 'page-a' } });
+        assert.deepEqual(second, { items: [{ id: 'page-b' }], cursor: null });
         assert.equal(fake.inputs.length, 2);
         assert.equal(fake.inputs[0].Limit, 1);
     });
 
     test('iterates pages lazily and stops without fetching the next page', async () => {
         const fake = createFakeDynamoDB(() => ({
-            Items: [QuerySerializer.serialiseMap({id: 'lazy'})],
-            LastEvaluatedKey: QuerySerializer.serialiseMap({id: 'lazy'})
+            Items: [QuerySerializer.serialiseMap({ id: 'lazy' })],
+            LastEvaluatedKey: QuerySerializer.serialiseMap({ id: 'lazy' })
         }));
-        const pages = new QueryBuilder('test', fake.db).scan().pages<any>({limit: 1});
+        const pages = new QueryBuilder('test', fake.db).scan().pages<any>({ limit: 1 });
 
         for await (const page of pages) {
-            assert.deepEqual(page.items, [{id: 'lazy'}]);
+            assert.deepEqual(page.items, [{ id: 'lazy' }]);
             break;
         }
 
@@ -221,14 +256,16 @@ describe('query - QueryBuilder pagination and batches', () => {
     });
 
     test('snapshots a lazy cursor before iteration and between pages', async () => {
-        const fake = createFakeDynamoDB((command, attempt) => attempt === 1
-            ? {
-                Items: [QuerySerializer.serialiseMap({id: 'first'})],
-                LastEvaluatedKey: QuerySerializer.serialiseMap({id: 'next'})
-            }
-            : {Items: []});
-        const cursor = {id: 'before'};
-        const pages = new QueryBuilder('test', fake.db).scan().pages<any>({cursor});
+        const fake = createFakeDynamoDB((command, attempt) =>
+            attempt === 1
+                ? {
+                      Items: [QuerySerializer.serialiseMap({ id: 'first' })],
+                      LastEvaluatedKey: QuerySerializer.serialiseMap({ id: 'next' })
+                  }
+                : { Items: [] }
+        );
+        const cursor = { id: 'before' };
+        const pages = new QueryBuilder('test', fake.db).scan().pages<any>({ cursor });
         cursor.id = 'mutated-before-iteration';
 
         const iterator = pages[Symbol.asyncIterator]();
@@ -242,16 +279,18 @@ describe('query - QueryBuilder pagination and batches', () => {
     });
 
     test('item iteration crosses empty filtered pages', async () => {
-        const fake = createFakeDynamoDB((command, attempt) => attempt === 1
-            ? {Items: [], LastEvaluatedKey: QuerySerializer.serialiseMap({id: 'empty-page'})}
-            : {Items: [QuerySerializer.serialiseMap({id: 'matched'})]});
+        const fake = createFakeDynamoDB((command, attempt) =>
+            attempt === 1
+                ? { Items: [], LastEvaluatedKey: QuerySerializer.serialiseMap({ id: 'empty-page' }) }
+                : { Items: [QuerySerializer.serialiseMap({ id: 'matched' })] }
+        );
         const items: any[] = [];
 
-        for await (const item of new QueryBuilder('test', fake.db).scan().items<any>({limit: 1})) {
+        for await (const item of new QueryBuilder('test', fake.db).scan().items<any>({ limit: 1 })) {
             items.push(item);
         }
 
-        assert.deepEqual(items, [{id: 'matched'}]);
+        assert.deepEqual(items, [{ id: 'matched' }]);
         assert.equal(fake.inputs[1].ExclusiveStartKey.id.S, 'empty-page');
     });
 
@@ -259,13 +298,18 @@ describe('query - QueryBuilder pagination and batches', () => {
         const error = new Error('later page failed');
         for (const terminal of ['all', 'pages', 'items', 'count'] as const) {
             const fake = createFakeDynamoDB((_command, attempt) => {
-                if (attempt === 1) return {Items: [QuerySerializer.serialiseMap({id: 'first'})], Count: 1,
-                    LastEvaluatedKey: QuerySerializer.serialiseMap({id: 'first'})};
+                if (attempt === 1)
+                    return {
+                        Items: [QuerySerializer.serialiseMap({ id: 'first' })],
+                        Count: 1,
+                        LastEvaluatedKey: QuerySerializer.serialiseMap({ id: 'first' })
+                    };
                 throw error;
             });
             const chain = new QueryBuilder('test', fake.db).scan();
             if (terminal === 'all') await assert.rejects(chain.toPromise(), (failure) => failure === error);
-            else if (terminal === 'count') await assert.rejects(chain.count().toPromise(), (failure) => failure === error);
+            else if (terminal === 'count')
+                await assert.rejects(chain.count().toPromise(), (failure) => failure === error);
             else {
                 const iterator = (terminal === 'pages' ? chain.pages() : chain.items())[Symbol.asyncIterator]();
                 assert.equal((await iterator.next()).done, false);
@@ -273,23 +317,28 @@ describe('query - QueryBuilder pagination and batches', () => {
             }
             assert.equal(fake.inputs.length, 2);
         }
-        const fake = createFakeDynamoDB((_command, attempt) => attempt < 4
-            ? {Items: [], LastEvaluatedKey: QuerySerializer.serialiseMap({id: `empty-${attempt}`})}
-            : {Items: []});
+        const fake = createFakeDynamoDB((_command, attempt) =>
+            attempt < 4
+                ? { Items: [], LastEvaluatedKey: QuerySerializer.serialiseMap({ id: `empty-${attempt}` }) }
+                : { Items: [] }
+        );
         const pages = [];
         for await (const page of new QueryBuilder('test', fake.db).scan().pages()) pages.push(page);
         assert.equal(pages.length, 4);
-        assert.deepEqual(pages.at(-1), {items: [], cursor: null});
+        assert.deepEqual(pages.at(-1), { items: [], cursor: null });
         assert.equal(fake.inputs.length, 4);
     });
 
     test('rejects invalid page options, repeat execution, and iterator service failures', async () => {
         const invalid = new QueryBuilder('test', createFakeDynamoDB().db).scan();
-        assert.throws(() => invalid.page({limit: 0}), /positive integer/);
+        assert.throws(() => invalid.page({ limit: 0 }), /positive integer/);
         await invalid.page();
-        assert.throws(() => new QueryBuilder('test', createFakeDynamoDB().db).scan().pages({cursor: {}}), /at least one key/);
+        assert.throws(
+            () => new QueryBuilder('test', createFakeDynamoDB().db).scan().pages({ cursor: {} }),
+            /at least one key/
+        );
 
-        const fake = createFakeDynamoDB(() => ({Items: []}));
+        const fake = createFakeDynamoDB(() => ({ Items: [] }));
         const query = new QueryBuilder('test', fake.db).scan();
         await query.page();
         assert.throws(() => query.pages(), /only be executed once/);
@@ -304,14 +353,17 @@ describe('query - QueryBuilder pagination and batches', () => {
     });
 
     test('counts matches across pages without loading items', async () => {
-        const fake = createFakeDynamoDB((command, attempt) => attempt === 1
-            ? {Count: 2, ScannedCount: 4, LastEvaluatedKey: QuerySerializer.serialiseMap({id: 'count-page'})}
-            : {Count: 1, ScannedCount: 3});
+        const fake = createFakeDynamoDB((command, attempt) =>
+            attempt === 1
+                ? { Count: 2, ScannedCount: 4, LastEvaluatedKey: QuerySerializer.serialiseMap({ id: 'count-page' }) }
+                : { Count: 1, ScannedCount: 3 }
+        );
 
         const count = await new QueryBuilder('test', fake.db)
             .scan()
             .limit(4, null)
-            .where('status').eq('active')
+            .where('status')
+            .eq('active')
             .count()
             .toPromise();
 
@@ -330,7 +382,7 @@ describe('query - QueryBuilder pagination and batches', () => {
             throw serviceError;
         });
         await assert.rejects(
-            new QueryBuilder('test', failing.db).query({id: 'count'}).count().toPromise(),
+            new QueryBuilder('test', failing.db).query({ id: 'count' }).count().toPromise(),
             (error) => error === serviceError
         );
     });
@@ -341,18 +393,18 @@ describe('query - QueryBuilder pagination and batches', () => {
             if (attempt === 1) {
                 return {
                     Items: [
-                        QuerySerializer.serialiseMap({id: 'page-1-a'}),
-                        QuerySerializer.serialiseMap({id: 'page-1-b'})
+                        QuerySerializer.serialiseMap({ id: 'page-1-a' }),
+                        QuerySerializer.serialiseMap({ id: 'page-1-b' })
                     ],
-                    LastEvaluatedKey: QuerySerializer.serialiseMap({id: 'page-1-b'})
+                    LastEvaluatedKey: QuerySerializer.serialiseMap({ id: 'page-1-b' })
                 };
             }
 
             assert.equal(command.input.ExclusiveStartKey.id.S, 'page-1-b');
             return {
                 Items: [
-                    QuerySerializer.serialiseMap({id: 'page-2-a'}),
-                    QuerySerializer.serialiseMap({id: 'page-2-b'})
+                    QuerySerializer.serialiseMap({ id: 'page-2-a' }),
+                    QuerySerializer.serialiseMap({ id: 'page-2-b' })
                 ]
             };
         });
@@ -363,16 +415,19 @@ describe('query - QueryBuilder pagination and batches', () => {
             .limit(2, 3)
             .toPromise<any[]>();
 
-        assert.deepEqual(result.map((item) => item.id), ['page-1-a', 'page-1-b', 'page-2-a']);
+        assert.deepEqual(
+            result.map((item) => item.id),
+            ['page-1-a', 'page-1-b', 'page-2-a']
+        );
         assert.equal(fake.inputs.length, 2);
-        assert.deepEqual(logs.map((message) => message.event || message.method), [
-            'scan',
-            'scan',
-            'next_page',
-            'scan',
-            'scan'
-        ]);
-        assert.deepEqual(logs.filter((message) => message.result).map((message) => message.result.count), [2, 2]);
+        assert.deepEqual(
+            logs.map((message) => message.event || message.method),
+            ['scan', 'scan', 'next_page', 'scan', 'scan']
+        );
+        assert.deepEqual(
+            logs.filter((message) => message.result).map((message) => message.result.count),
+            [2, 2]
+        );
     });
 
     test('runs queued write chunks serially', async () => {
@@ -391,12 +446,15 @@ describe('query - QueryBuilder pagination and batches', () => {
                 });
             }
         } as unknown as DynamoDBClient;
-        const documents = Array.from({length: 26}).map((_, index) => ({id: `queued-${index}`}));
+        const documents = Array.from({ length: 26 }).map((_, index) => ({ id: `queued-${index}` }));
 
         const result = await new QueryBuilder('test', db).createBatch<any>(documents, true);
 
         assert.equal(result.length, 26);
-        assert.deepEqual(chunkSizes.sort((left, right) => left - right), [1, 25]);
+        assert.deepEqual(
+            chunkSizes.sort((left, right) => left - right),
+            [1, 25]
+        );
         assert.equal(maximumActiveRequests, 1);
     });
 
@@ -412,12 +470,12 @@ describe('query - QueryBuilder pagination and batches', () => {
             }
 
             getSizes.push(tableRequest.Keys.length);
-            return {Responses: {test: []}};
+            return { Responses: { test: [] } };
         });
-        const twentyFive = Array.from({length: 25}).map((_, index) => ({id: `boundary-25-${index}`}));
-        const twentySix = Array.from({length: 26}).map((_, index) => ({id: `boundary-26-${index}`}));
-        const oneHundred = Array.from({length: 100}).map((_, index) => ({id: `boundary-100-${index}`}));
-        const oneHundredOne = Array.from({length: 101}).map((_, index) => ({id: `boundary-101-${index}`}));
+        const twentyFive = Array.from({ length: 25 }).map((_, index) => ({ id: `boundary-25-${index}` }));
+        const twentySix = Array.from({ length: 26 }).map((_, index) => ({ id: `boundary-26-${index}` }));
+        const oneHundred = Array.from({ length: 100 }).map((_, index) => ({ id: `boundary-100-${index}` }));
+        const oneHundredOne = Array.from({ length: 101 }).map((_, index) => ({ id: `boundary-101-${index}` }));
 
         assert.deepEqual(await new QueryBuilder('test', fake.db).createBatch<any>([]), []);
         assert.deepEqual(await new QueryBuilder('test', fake.db).getBatch<any>([]), []);
@@ -451,7 +509,7 @@ describe('query - QueryBuilder pagination and batches', () => {
                 });
             }
         } as unknown as DynamoDBClient;
-        const documents = Array.from({length: 26}).map((_, index) => ({id: `parallel-${index}`}));
+        const documents = Array.from({ length: 26 }).map((_, index) => ({ id: `parallel-${index}` }));
 
         const work = new QueryBuilder('test', db).createBatch<any>(documents, false);
         resolvers.forEach((resolve) => resolve());
@@ -470,16 +528,19 @@ describe('query - QueryBuilder pagination and batches', () => {
                 send: () => {
                     activeRequests++;
                     maximumActiveRequests = Math.max(maximumActiveRequests, activeRequests);
-                    return new Promise((resolve) => resolvers.push(() => {
-                        activeRequests--;
-                        resolve({});
-                    }));
+                    return new Promise((resolve) =>
+                        resolvers.push(() => {
+                            activeRequests--;
+                            resolve({});
+                        })
+                    );
                 }
             } as unknown as DynamoDBClient;
-            const documents = Array.from({length: 126}).map((_, index) => ({id: `bounded-${index}`}));
-            const work = concurrency === undefined
-                ? new QueryBuilder('test', db).createBatch(documents)
-                : new QueryBuilder('test', db).createBatch(documents, {concurrency: concurrency});
+            const documents = Array.from({ length: 126 }).map((_, index) => ({ id: `bounded-${index}` }));
+            const work =
+                concurrency === undefined
+                    ? new QueryBuilder('test', db).createBatch(documents)
+                    : new QueryBuilder('test', db).createBatch(documents, { concurrency: concurrency });
 
             while (activeRequests > 0 || resolvers.length > 0) {
                 resolvers.splice(0).forEach((resolve) => resolve());
@@ -495,7 +556,8 @@ describe('query - QueryBuilder pagination and batches', () => {
 
     test('rejects invalid batch concurrency and stops scheduling after worker failure', async () => {
         assert.throws(
-            () => new QueryBuilder('test', createFakeDynamoDB().db).createBatch([{id: 'invalid'}], {concurrency: 0}),
+            () =>
+                new QueryBuilder('test', createFakeDynamoDB().db).createBatch([{ id: 'invalid' }], { concurrency: 0 }),
             /positive integer/
         );
 
@@ -510,10 +572,10 @@ describe('query - QueryBuilder pagination and batches', () => {
                 return {};
             }
         } as unknown as DynamoDBClient;
-        const documents = Array.from({length: 101}).map((_, index) => ({id: `failure-${index}`}));
+        const documents = Array.from({ length: 101 }).map((_, index) => ({ id: `failure-${index}` }));
 
         await assert.rejects(
-            new QueryBuilder('test', db).createBatch(documents, {concurrency: 1}),
+            new QueryBuilder('test', db).createBatch(documents, { concurrency: 1 }),
             (error) => error === serviceError
         );
         assert.equal(requests, 1);
@@ -529,9 +591,11 @@ describe('query - QueryBuilder pagination and batches', () => {
                 return new Promise((resolve) => (releaseActive = () => resolve({})));
             }
         } as unknown as DynamoDBClient;
-        const concurrentWork = new QueryBuilder('test', concurrentDb).createBatch(documents, {concurrency: 2});
+        const concurrentWork = new QueryBuilder('test', concurrentDb).createBatch(documents, { concurrency: 2 });
         let settled = false;
-        const expectation = assert.rejects(concurrentWork, (error) => error === serviceError).finally(() => (settled = true));
+        const expectation = assert
+            .rejects(concurrentWork, (error) => error === serviceError)
+            .finally(() => (settled = true));
 
         await new Promise((resolve) => setImmediate(resolve));
         assert.equal(settled, false);
@@ -548,7 +612,7 @@ describe('query - QueryBuilder pagination and batches', () => {
             if (attempt === 1) {
                 const tableRequest = command.input.RequestItems.test;
                 return {
-                    Responses: {test: [QuerySerializer.serialiseMap({id: 'partial-a'})]},
+                    Responses: { test: [QuerySerializer.serialiseMap({ id: 'partial-a' })] },
                     UnprocessedKeys: {
                         test: {
                             ConsistentRead: tableRequest.ConsistentRead,
@@ -560,14 +624,17 @@ describe('query - QueryBuilder pagination and batches', () => {
 
             assert.equal(command.input.RequestItems.test.Keys.length, 1);
             assert.equal(command.input.RequestItems.test.Keys[0].id.S, 'partial-b');
-            return {Responses: {test: [QuerySerializer.serialiseMap({id: 'partial-b'})]}};
+            return { Responses: { test: [QuerySerializer.serialiseMap({ id: 'partial-b' })] } };
         });
 
         const result = await new QueryBuilder('test', fake.db)
             .logger((message) => logs.push(message))
-            .getBatch<any>([{id: 'partial-a'}, {id: 'partial-b'}]);
+            .getBatch<any>([{ id: 'partial-a' }, { id: 'partial-b' }]);
 
-        assert.deepEqual(result.map((item) => item.id), ['partial-a', 'partial-b']);
+        assert.deepEqual(
+            result.map((item) => item.id),
+            ['partial-a', 'partial-b']
+        );
         assert.equal(fake.inputs.length, 2);
         assert.equal(logs.length, 5);
         assert.equal(logs[0].method, 'batchGetItem');
@@ -580,19 +647,21 @@ describe('query - QueryBuilder pagination and batches', () => {
     });
 
     test('rejects after eight unprocessed-item retries', async (t) => {
-        t.mock.timers.enable({apis: ['setTimeout']});
+        t.mock.timers.enable({ apis: ['setTimeout'] });
         const fake = createFakeDynamoDB((command, attempt) => ({
-            Responses: {test: attempt === 1 ? [{id: {S: 'completed'}}] : []},
+            Responses: { test: attempt === 1 ? [{ id: { S: 'completed' } }] : [] },
             UnprocessedKeys: command.input.RequestItems
         }));
 
         const expectation = assert.rejects(
-            new QueryBuilder('test', fake.db).getBatch<any>([{id: 'retry-exhaustion'}]),
-            error => {
+            new QueryBuilder('test', fake.db).getBatch<any>([{ id: 'retry-exhaustion' }]),
+            (error) => {
                 assert.ok(error instanceof BatchRetryError);
                 assert.equal(error.operation, 'batchGetItem');
-                assert.deepEqual(error.partialResults, [{id: 'completed'}]);
-                assert.deepEqual(error.unprocessedItems, {test: {ConsistentRead: false, Keys: [{id: {S: 'retry-exhaustion'}}]}});
+                assert.deepEqual(error.partialResults, [{ id: 'completed' }]);
+                assert.deepEqual(error.unprocessedItems, {
+                    test: { ConsistentRead: false, Keys: [{ id: { S: 'retry-exhaustion' } }] }
+                });
                 return true;
             }
         );
@@ -608,83 +677,116 @@ describe('query - QueryBuilder pagination and batches', () => {
 
     test('retries unprocessed batch writes', async () => {
         const fake = createFakeDynamoDB((command, attempt) => {
-            return attempt === 1 ? {UnprocessedItems: command.input.RequestItems} : {};
+            return attempt === 1 ? { UnprocessedItems: command.input.RequestItems } : {};
         });
 
-        const result = await new QueryBuilder('test', fake.db).createBatch<any>([{id: 'batch-write-retry'}]);
+        const result = await new QueryBuilder('test', fake.db).createBatch<any>([{ id: 'batch-write-retry' }]);
 
-        assert.deepEqual(result, [{id: 'batch-write-retry'}]);
+        assert.deepEqual(result, [{ id: 'batch-write-retry' }]);
         assert.equal(fake.inputs.length, 2);
     });
 
-    test('reports only unprocessed writes after retry exhaustion', async context => {
-        context.mock.timers.enable({apis: ['setTimeout']});
-        const fake = createFakeDynamoDB((command, attempt) => ({UnprocessedItems: {
-            test: attempt === 1 ? command.input.RequestItems.test.slice(1) : command.input.RequestItems.test
-        }}));
-        const pending = assert.rejects(new QueryBuilder('test', fake.db).createBatch([{id: 'done'}, {id: 'pending'}]), error => {
-            assert.ok(error instanceof BatchRetryError);
-            assert.equal(error.operation, 'batchWriteItem');
-            assert.deepEqual(error.unprocessedItems, {test: [{PutRequest: {Item: {id: {S: 'pending'}}}}]});
-            return true;
-        });
+    test('reports only unprocessed writes after retry exhaustion', async (context) => {
+        context.mock.timers.enable({ apis: ['setTimeout'] });
+        const fake = createFakeDynamoDB((command, attempt) => ({
+            UnprocessedItems: {
+                test: attempt === 1 ? command.input.RequestItems.test.slice(1) : command.input.RequestItems.test
+            }
+        }));
+        const pending = assert.rejects(
+            new QueryBuilder('test', fake.db).createBatch([{ id: 'done' }, { id: 'pending' }]),
+            (error) => {
+                assert.ok(error instanceof BatchRetryError);
+                assert.equal(error.operation, 'batchWriteItem');
+                assert.deepEqual(error.unprocessedItems, {
+                    test: [{ PutRequest: { Item: { id: { S: 'pending' } } } }]
+                });
+                return true;
+            }
+        );
         for (let attempt = 0; attempt < 10; attempt++) {
-            await new Promise(resolve => setImmediate(resolve));
+            await new Promise((resolve) => setImmediate(resolve));
             context.mock.timers.runAll();
         }
         await pending;
         assert.equal(fake.inputs.length, 9);
-        assert.ok(fake.inputs.slice(1).every(input => input.RequestItems.test.length === 1));
+        assert.ok(fake.inputs.slice(1).every((input) => input.RequestItems.test.length === 1));
     });
 
-    test('retains projection and consistency across shuffled partial batch reads', async context => {
+    test('retains projection and consistency across shuffled partial batch reads', async (context) => {
         context.mock.method(Math, 'random', () => 0);
         const fake = createFakeDynamoDB((command, attempt) => {
             const request = command.input.RequestItems.test;
             assert.equal(request.ConsistentRead, true);
             assert.equal(request.ProjectionExpression, '#id');
-            assert.deepEqual(request.ExpressionAttributeNames, {'#id': 'id'});
-            return attempt === 1 ? {
-                Responses: {test: [{id: {S: 'second'}}]},
-                UnprocessedKeys: {test: {...request, Keys: [request.Keys[0]]}}
-            } : {Responses: {test: [{id: {S: 'first'}}]}};
+            assert.deepEqual(request.ExpressionAttributeNames, { '#id': 'id' });
+            return attempt === 1
+                ? {
+                      Responses: { test: [{ id: { S: 'second' } }] },
+                      UnprocessedKeys: { test: { ...request, Keys: [request.Keys[0]] } }
+                  }
+                : { Responses: { test: [{ id: { S: 'first' } }] } };
         });
-        const result = await new QueryBuilder('test', fake.db).getBatch([{id: 'first'}, {id: 'second'}, {id: 'missing'}],
-            {consistentRead: true, select: ['id']});
-        assert.deepEqual(result, [{id: 'second'}, {id: 'first'}]);
+        const result = await new QueryBuilder('test', fake.db).getBatch(
+            [{ id: 'first' }, { id: 'second' }, { id: 'missing' }],
+            { consistentRead: true, select: ['id'] }
+        );
+        assert.deepEqual(result, [{ id: 'second' }, { id: 'first' }]);
         const failure = new Error('service failed after partial success');
         const failing = createFakeDynamoDB((command, attempt) => {
-            if (attempt === 1) return {Responses: {test: [{id: {S: 'done'}}]}, UnprocessedKeys: command.input.RequestItems};
+            if (attempt === 1)
+                return { Responses: { test: [{ id: { S: 'done' } }] }, UnprocessedKeys: command.input.RequestItems };
             throw failure;
         });
-        await assert.rejects(new QueryBuilder('test', failing.db).getBatch([{id: 'pending'}]), error => error === failure);
+        await assert.rejects(
+            new QueryBuilder('test', failing.db).getBatch([{ id: 'pending' }]),
+            (error) => error === failure
+        );
     });
 
     test('accumulates capacity across byte-like page boundaries and empty pages', async () => {
         const fake = createFakeDynamoDB((_command, attempt) => ({
-            Items: attempt === 1 ? [] : [{id: {S: 'last'}}],
-            LastEvaluatedKey: attempt === 1 ? {id: {S: 'first'}} : {},
-            ConsumedCapacity: {TableName: 'test', CapacityUnits: attempt}
+            Items: attempt === 1 ? [] : [{ id: { S: 'last' } }],
+            LastEvaluatedKey: attempt === 1 ? { id: { S: 'first' } } : {},
+            ConsumedCapacity: { TableName: 'test', CapacityUnits: attempt }
         }));
         const result = await new QueryBuilder('test', fake.db).scan().toResponse();
-        assert.deepEqual(result.value, [{id: 'last'}]);
-        assert.deepEqual(result.consumedCapacity.map(entry => entry.CapacityUnits), [1, 2]);
+        assert.deepEqual(result.value, [{ id: 'last' }]);
+        assert.deepEqual(
+            result.consumedCapacity.map((entry) => entry.CapacityUnits),
+            [1, 2]
+        );
     });
 
-    test('accumulates SDK capacity and item collection reports across retries', async context => {
+    test('accumulates SDK capacity and item collection reports across retries', async (context) => {
         context.mock.method(Math, 'random', () => 0);
-        const metric = {ItemCollectionKey: {id: {S: 'one'}}, SizeEstimateRangeGB: [0, 1]};
+        const metric = { ItemCollectionKey: { id: { S: 'one' } }, SizeEstimateRangeGB: [0, 1] };
         const fake = createFakeDynamoDB((command, attempt) => ({
-            ConsumedCapacity: [{TableName: 'test', CapacityUnits: attempt}],
-            ItemCollectionMetrics: {test: [metric]},
+            ConsumedCapacity: [{ TableName: 'test', CapacityUnits: attempt }],
+            ItemCollectionMetrics: { test: [metric] },
             UnprocessedItems: attempt === 1 ? command.input.RequestItems : {}
         }));
-        const executor = new QueryExecutor(fake.db, {kind: 'batchWriteItem', input: {
-            RequestItems: {test: [{PutRequest: {Item: {id: {S: 'one'}}}}]},
-            ReturnConsumedCapacity: 'INDEXES', ReturnItemCollectionMetrics: 'SIZE'
-        }}, [{id: 'one'}], null, null, 'retry-metadata', null);
+        const executor = new QueryExecutor(
+            fake.db,
+            {
+                kind: 'batchWriteItem',
+                input: {
+                    RequestItems: { test: [{ PutRequest: { Item: { id: { S: 'one' } } } }] },
+                    ReturnConsumedCapacity: 'INDEXES',
+                    ReturnItemCollectionMetrics: 'SIZE'
+                }
+            },
+            [{ id: 'one' }],
+            null,
+            null,
+            'retry-metadata',
+            null
+        );
         const response = await executor.executeResponse();
-        assert.deepEqual(response.consumedCapacity.map(entry => entry.CapacityUnits), [1, 2]);
+        assert.deepEqual(
+            response.consumedCapacity.map((entry) => entry.CapacityUnits),
+            [1, 2]
+        );
         assert.deepEqual(response.itemCollectionMetrics, [metric, metric]);
     });
 
@@ -696,13 +798,13 @@ describe('query - QueryBuilder pagination and batches', () => {
             return serialiseMap(document);
         });
         const fake = createFakeDynamoDB((command) => ({
-            Responses: {test: command.input.RequestItems.test.Keys}
+            Responses: { test: command.input.RequestItems.test.Keys }
         }));
 
         const result = await new QueryBuilder('test', fake.db).getBatch<any>([
-            {id: 'dedupe-a', sort: 1},
-            {sort: 1, id: 'dedupe-a'},
-            {id: 'dedupe-b', sort: 2}
+            { id: 'dedupe-a', sort: 1 },
+            { sort: 1, id: 'dedupe-a' },
+            { id: 'dedupe-b', sort: 2 }
         ]);
 
         assert.equal(fake.inputs.length, 1);

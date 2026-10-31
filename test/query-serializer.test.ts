@@ -1,25 +1,36 @@
 import assert from 'node:assert/strict';
-import {describe, test} from 'node:test';
-import {QuerySerializer} from '../src/query-serializer';
+import { describe, test } from 'node:test';
+import { QuerySerializer } from '../src/query-serializer';
 
 describe('query - QuerySerializer', () => {
     test('rejects malformed known AttributeValue descriptors', () => {
-        for (const descriptor of [null, {S: 1}, {BOOL: 'true'}, {NULL: false}, {S: 'one', N: '1'},
-            {L: {}}, {M: null}, {SS: []}, {NS: [1]}, {BS: [{}]}, {B: {type: 'Buffer', data: [1]}}]) {
+        for (const descriptor of [
+            null,
+            { S: 1 },
+            { BOOL: 'true' },
+            { NULL: false },
+            { S: 'one', N: '1' },
+            { L: {} },
+            { M: null },
+            { SS: [] },
+            { NS: [1] },
+            { BS: [{}] },
+            { B: { type: 'Buffer', data: [1] } }
+        ]) {
             assert.throws(() => QuerySerializer.parseField(descriptor), /AttributeValue/);
         }
     });
 
     test('rejects lossy numbers and enforces numeric range boundaries', () => {
         for (const value of ['9007199254740993', '0.123456789012345678901', '1x', '1e-131', '1e126']) {
-            assert.throws(() => QuerySerializer.parseField({N: value}));
-            assert.throws(() => QuerySerializer.parseField({NS: [value]}));
+            assert.throws(() => QuerySerializer.parseField({ N: value }));
+            assert.throws(() => QuerySerializer.parseField({ NS: [value] }));
         }
         for (const value of [1e-131, 1e126, -1e126]) assert.throws(() => QuerySerializer.serialiseItem(value), /range/);
         for (const value of [0, 1e-130, -1e-130, 1e125, Number.MAX_SAFE_INTEGER]) {
             assert.equal(QuerySerializer.parseField(QuerySerializer.serialiseItem(value)), value);
         }
-        assert.equal(QuerySerializer.parseField({N: '+001.2000e+2'}), 120);
+        assert.equal(QuerySerializer.parseField({ N: '+001.2000e+2' }), 120);
     });
 
     test('rejects unsupported and cyclic objects while allowing shared references', () => {
@@ -29,33 +40,40 @@ describe('query - QuerySerializer', () => {
         const cycle: Record<string, unknown> = {};
         cycle['self'] = cycle;
         assert.throws(() => QuerySerializer.serialiseMap(cycle), /cyclic/);
-        const shared = {value: 1};
+        const shared = { value: 1 };
         assert.deepEqual(QuerySerializer.parseField(QuerySerializer.serialiseItem([shared, shared])), [shared, shared]);
         let nested: unknown = 'leaf';
-        for (let depth = 0; depth < 32; depth++) nested = {nested};
-        assert.doesNotThrow(() => QuerySerializer.serialiseMap({nested}));
-        assert.throws(() => QuerySerializer.serialiseMap({nested: {nested}}), /32 nesting/);
-        const encoded = QuerySerializer.serialiseItem(new Set([Buffer.from([1]), new Uint8Array([1])])) as {BS: Uint8Array[]};
+        for (let depth = 0; depth < 32; depth++) nested = { nested };
+        assert.doesNotThrow(() => QuerySerializer.serialiseMap({ nested }));
+        assert.throws(() => QuerySerializer.serialiseMap({ nested: { nested } }), /32 nesting/);
+        const encoded = QuerySerializer.serialiseItem(new Set([Buffer.from([1]), new Uint8Array([1])])) as {
+            BS: Uint8Array[];
+        };
         assert.equal(encoded.BS.length, 1);
     });
 
     test('preserves special own names and ignores inherited attributes', () => {
-        const nested = Object.fromEntries([['__proto__', 'safe'], ['hasOwnProperty', 'attribute']]);
-        const document = Object.assign(Object.create({inherited: 'ignored'}), {nested});
-        Object.defineProperty(document, '__proto__', {value: nested, enumerable: true});
+        const nested = Object.fromEntries([
+            ['__proto__', 'safe'],
+            ['hasOwnProperty', 'attribute']
+        ]);
+        const document = Object.assign(Object.create({ inherited: 'ignored' }), { nested });
+        Object.defineProperty(document, '__proto__', { value: nested, enumerable: true });
         const result = QuerySerializer.parseItem(QuerySerializer.serialiseMap(document));
         assert.deepEqual(Object.keys(result), ['nested', '__proto__']);
         assert.deepEqual(result['__proto__'], nested);
         assert.equal(Object.getPrototypeOf(result), Object.prototype);
-        assert.deepEqual(QuerySerializer.parseItem(Object.create({inherited: {S: 'ignored'}})), {});
-        assert.deepEqual(QuerySerializer.serialiseMap(Object.assign(Object.create(null), {id: 'one'})), {id: {S: 'one'}});
+        assert.deepEqual(QuerySerializer.parseItem(Object.create({ inherited: { S: 'ignored' } })), {});
+        assert.deepEqual(QuerySerializer.serialiseMap(Object.assign(Object.create(null), { id: 'one' })), {
+            id: { S: 'one' }
+        });
     });
 
     test('detaches decoded and directly encoded binary values', () => {
         const binary = new Uint8Array([1]);
-        const encoded = QuerySerializer.serialiseObject(binary) as {B: Uint8Array};
-        const decoded = QuerySerializer.parseField({B: binary});
-        const set = QuerySerializer.parseField({BS: [binary]});
+        const encoded = QuerySerializer.serialiseObject(binary) as { B: Uint8Array };
+        const decoded = QuerySerializer.parseField({ B: binary });
+        const set = QuerySerializer.parseField({ BS: [binary] });
         binary[0] = 9;
         assert.equal(encoded.B[0], 1);
         assert.equal(decoded[0], 1);
@@ -67,7 +85,7 @@ describe('query - QuerySerializer', () => {
             active: true,
             nullable: null,
             values: [1, 'two'],
-            nested: {value: 3}
+            nested: { value: 3 }
         };
 
         const result = QuerySerializer.parseItem(QuerySerializer.serialiseMap(document) as any);
@@ -79,34 +97,29 @@ describe('query - QuerySerializer', () => {
         const binary = new Uint8Array([1, 2, 3]);
         const binarySet = new Set([Buffer.from('one'), Buffer.from('two')]);
         const serialised = QuerySerializer.serialiseMap({
-            list: [1, 'two', {enabled: true}, binary],
-            map: {owner: {id: 'account-1'}, empty: {}},
+            list: [1, 'two', { enabled: true }, binary],
+            map: { owner: { id: 'account-1' }, empty: {} },
             binary,
             binarySet
         });
 
         assert.deepEqual(serialised['list'], {
-            L: [
-                {N: '1'},
-                {S: 'two'},
-                {M: {enabled: {BOOL: true}}},
-                {B: binary}
-            ]
+            L: [{ N: '1' }, { S: 'two' }, { M: { enabled: { BOOL: true } } }, { B: binary }]
         });
         assert.deepEqual(serialised['map'], {
             M: {
-                owner: {M: {id: {S: 'account-1'}}},
-                empty: {M: {}}
+                owner: { M: { id: { S: 'account-1' } } },
+                empty: { M: {} }
             }
         });
-        assert.deepEqual(serialised['binary'], {B: binary});
-        assert.deepEqual(serialised['binarySet'], {BS: Array.from(binarySet)});
+        assert.deepEqual(serialised['binary'], { B: binary });
+        assert.deepEqual(serialised['binarySet'], { BS: Array.from(binarySet) });
     });
 
     test('detaches binary attribute values from source buffers', () => {
         const binary = Buffer.from([1, 2]);
         const setBinary = Buffer.from([3, 4]);
-        const serialised = QuerySerializer.serialiseMap({binary, binarySet: new Set([setBinary])}) as any;
+        const serialised = QuerySerializer.serialiseMap({ binary, binarySet: new Set([setBinary]) }) as any;
 
         binary[0] = 9;
         setBinary[0] = 8;
@@ -116,17 +129,19 @@ describe('query - QuerySerializer', () => {
     });
 
     test('round trips number and string sets', () => {
-        const result = QuerySerializer.parseItem(QuerySerializer.serialiseMap({
-            numbers: new Set([1, 2, 3]),
-            strings: new Set(['one', 'two'])
-        }) as any) as any;
+        const result = QuerySerializer.parseItem(
+            QuerySerializer.serialiseMap({
+                numbers: new Set([1, 2, 3]),
+                strings: new Set(['one', 'two'])
+            }) as any
+        ) as any;
 
         assert.deepEqual(result.numbers, new Set([1, 2, 3]));
         assert.deepEqual(result.strings, new Set(['one', 'two']));
     });
 
     test('round trips fractional number sets', () => {
-        const serialised = QuerySerializer.serialiseMap({values: new Set([1.5, 2.25, -0.75])});
+        const serialised = QuerySerializer.serialiseMap({ values: new Set([1.5, 2.25, -0.75]) });
         const result = QuerySerializer.parseItem(serialised as any) as any;
 
         assert.ok(result.values instanceof Set);
@@ -134,15 +149,19 @@ describe('query - QuerySerializer', () => {
     });
 
     test('round trips buffers and binary sets', () => {
-        const result = QuerySerializer.parseItem(QuerySerializer.serialiseMap({
-            value: Buffer.from('one'),
-            values: new Set([Buffer.from('two'), Buffer.from('three')])
-        }) as any) as any;
+        const result = QuerySerializer.parseItem(
+            QuerySerializer.serialiseMap({
+                value: Buffer.from('one'),
+                values: new Set([Buffer.from('two'), Buffer.from('three')])
+            }) as any
+        ) as any;
 
         assert.deepEqual(Buffer.from(result.value), Buffer.from('one'));
         assert.ok(result.values instanceof Set);
         assert.deepEqual(
-            Array.from(result.values as Set<Uint8Array>).map((value) => Buffer.from(value).toString()).sort(),
+            Array.from(result.values as Set<Uint8Array>)
+                .map((value) => Buffer.from(value).toString())
+                .sort(),
             ['three', 'two']
         );
     });
@@ -151,37 +170,48 @@ describe('query - QuerySerializer', () => {
         const serialised = QuerySerializer.serialiseMap({
             id: 'skip-undefined',
             missing: undefined,
-            nested: {kept: 1, missing: undefined}
+            nested: { kept: 1, missing: undefined }
         });
 
         assert.deepEqual(Object.keys(serialised), ['id', 'nested']);
-        assert.deepEqual(serialised['nested'], {M: {kept: {N: '1'}}});
+        assert.deepEqual(serialised['nested'], { M: { kept: { N: '1' } } });
     });
 
     test('rejects undefined and unsupported value types', () => {
         assert.throws(() => QuerySerializer.serialiseItem(undefined), /Cannot serialise value of type undefined/);
-        assert.throws(() => QuerySerializer.serialiseItem(Symbol('unsupported')), /Cannot serialise value of type symbol/);
+        assert.throws(
+            () => QuerySerializer.serialiseItem(Symbol('unsupported')),
+            /Cannot serialise value of type symbol/
+        );
         assert.throws(() => QuerySerializer.serialiseItem(() => 1), /Cannot serialise value of type function/);
-        assert.throws(() => QuerySerializer.serialiseMap({values: ['kept', undefined]}), /Cannot serialise value of type undefined/);
+        assert.throws(
+            () => QuerySerializer.serialiseMap({ values: ['kept', undefined] }),
+            /Cannot serialise value of type undefined/
+        );
     });
 
     test('rejects non-finite numbers', () => {
         assert.throws(() => QuerySerializer.serialiseItem(NaN), /Cannot serialise non-finite number/);
         assert.throws(() => QuerySerializer.serialiseItem(Infinity), /Cannot serialise non-finite number/);
-        assert.throws(() => QuerySerializer.serialiseMap({value: -Infinity}), /Cannot serialise non-finite number/);
-        assert.throws(() => QuerySerializer.serialiseMap({values: new Set([1, NaN])}), /Cannot serialise non-finite number in Set/);
+        assert.throws(() => QuerySerializer.serialiseMap({ value: -Infinity }), /Cannot serialise non-finite number/);
+        assert.throws(
+            () => QuerySerializer.serialiseMap({ values: new Set([1, NaN]) }),
+            /Cannot serialise non-finite number in Set/
+        );
     });
 
     test('rejects empty sets', () => {
         assert.throws(() => QuerySerializer.serialiseItem(new Set()), /Cannot serialise an empty Set/);
-        assert.throws(() => QuerySerializer.serialiseMap({values: new Set()}), /Cannot serialise an empty Set/);
+        assert.throws(() => QuerySerializer.serialiseMap({ values: new Set() }), /Cannot serialise an empty Set/);
     });
 
     test('serialises mixed-type and boolean sets as lists', () => {
-        const result = QuerySerializer.parseItem(QuerySerializer.serialiseMap({
-            mixed: new Set([1, 'two']),
-            booleans: new Set([true, false])
-        }) as any) as any;
+        const result = QuerySerializer.parseItem(
+            QuerySerializer.serialiseMap({
+                mixed: new Set([1, 'two']),
+                booleans: new Set([true, false])
+            }) as any
+        ) as any;
 
         assert.deepEqual(result.mixed, [1, 'two']);
         assert.deepEqual(result.booleans, [true, false]);
@@ -212,8 +242,8 @@ describe('query - QuerySerializer', () => {
     test('round trips deeply nested structures', () => {
         const document = {
             pages: [
-                {title: 'first', tags: ['a', 'b'], meta: {order: 1, hidden: false}},
-                {title: 'second', tags: [], meta: {order: 2, hidden: true, extras: [{depth: 3}]}}
+                { title: 'first', tags: ['a', 'b'], meta: { order: 1, hidden: false } },
+                { title: 'second', tags: [], meta: { order: 2, hidden: true, extras: [{ depth: 3 }] } }
             ]
         };
 
@@ -230,9 +260,9 @@ describe('query - QuerySerializer', () => {
             timestamp: 1787735873743
         });
 
-        assert.deepEqual(serialised['large'], {N: '9007199254740991'});
-        assert.deepEqual(serialised['small'], {N: '-9007199254740991'});
-        assert.deepEqual(serialised['fractional'], {N: '0.1'});
+        assert.deepEqual(serialised['large'], { N: '9007199254740991' });
+        assert.deepEqual(serialised['small'], { N: '-9007199254740991' });
+        assert.deepEqual(serialised['fractional'], { N: '0.1' });
 
         const result = QuerySerializer.parseItem(serialised as any) as any;
         assert.equal(result.large, Number.MAX_SAFE_INTEGER);
@@ -242,37 +272,37 @@ describe('query - QuerySerializer', () => {
     });
 
     test('parses numeric attribute strings including scientific notation', () => {
-        assert.equal(QuerySerializer.parseField({N: '1e3'}), 1000);
-        assert.equal(QuerySerializer.parseField({N: '-0.5'}), -0.5);
-        assert.deepEqual(QuerySerializer.parseField({NS: ['1', '2.5', '-3']}), new Set([1, 2.5, -3]));
+        assert.equal(QuerySerializer.parseField({ N: '1e3' }), 1000);
+        assert.equal(QuerySerializer.parseField({ N: '-0.5' }), -0.5);
+        assert.deepEqual(QuerySerializer.parseField({ NS: ['1', '2.5', '-3'] }), new Set([1, 2.5, -3]));
     });
 
     test('returns undefined for unknown attribute descriptors', () => {
         assert.equal(QuerySerializer.parseField({}), undefined);
-        assert.equal(QuerySerializer.parseField({X: 'unsupported'}), undefined);
+        assert.equal(QuerySerializer.parseField({ X: 'unsupported' }), undefined);
     });
 
     test('parses multiple items with parseItems', () => {
         const items = [
-            {id: {S: 'first'}, value: {N: '1'}},
-            {id: {S: 'second'}, value: {N: '2'}}
+            { id: { S: 'first' }, value: { N: '1' } },
+            { id: { S: 'second' }, value: { N: '2' } }
         ];
 
         assert.deepEqual(QuerySerializer.parseItems(items), [
-            {id: 'first', value: 1},
-            {id: 'second', value: 2}
+            { id: 'first', value: 1 },
+            { id: 'second', value: 2 }
         ]);
     });
 
     test('serialises sets of plain objects as lists', () => {
         const serialised = QuerySerializer.serialiseMap({
-            objects: new Set([{value: 1}, {value: 2}]),
-            mixedBinary: new Set([Buffer.from('one'), {value: 3}])
+            objects: new Set([{ value: 1 }, { value: 2 }]),
+            mixedBinary: new Set([Buffer.from('one'), { value: 3 }])
         });
         const result = QuerySerializer.parseItem(serialised as any) as any;
 
-        assert.deepEqual(result.objects, [{value: 1}, {value: 2}]);
+        assert.deepEqual(result.objects, [{ value: 1 }, { value: 2 }]);
         assert.deepEqual(Buffer.from(result.mixedBinary[0]).toString(), 'one');
-        assert.deepEqual(result.mixedBinary[1], {value: 3});
+        assert.deepEqual(result.mixedBinary[1], { value: 3 });
     });
 });

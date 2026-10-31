@@ -57,7 +57,7 @@ function cloneError<Value extends Error>(value: Value, seen: WeakMap<object, unk
         Object.defineProperty(result, 'cause', {
             configurable: true,
             enumerable: false,
-            value: cloneValue((value as Error & {cause?: unknown}).cause, seen),
+            value: cloneValue((value as Error & { cause?: unknown }).cause, seen),
             writable: true
         });
     }
@@ -69,19 +69,21 @@ function cloneError<Value extends Error>(value: Value, seen: WeakMap<object, unk
 function cloneTypedArray<Value extends ArrayBufferView>(value: Value, seen: WeakMap<object, unknown>): Value {
     const source = value as unknown as object;
     const buffer = cloneValue(value.buffer as BufferLike, seen) as BufferLike;
-    const constructor = (value as unknown as {
-        constructor: {
-            new(buffer: BufferLike, byteOffset: number, length: number): Value;
-            from?: (...args: unknown[]) => Value;
-            name?: string;
-        };
-    }).constructor;
+    const constructor = (
+        value as unknown as {
+            constructor: {
+                new (buffer: BufferLike, byteOffset: number, length: number): Value;
+                from?: (...args: unknown[]) => Value;
+                name?: string;
+            };
+        }
+    ).constructor;
     let result: Value;
 
     if (constructor.name === 'Buffer' && typeof constructor.from === 'function') {
         result = constructor.from(buffer, value.byteOffset, value.byteLength);
     } else {
-        result = new constructor(buffer, value.byteOffset, (value as unknown as {length: number}).length);
+        result = new constructor(buffer, value.byteOffset, (value as unknown as { length: number }).length);
     }
 
     seen.set(source, result);
@@ -230,7 +232,12 @@ class ActivePairs {
     }
 }
 
-function equalsEnumerableProperties(left: object, right: object, pairs: ActivePairs, skip: (key: ObjectKey) => boolean = () => false): boolean {
+function equalsEnumerableProperties(
+    left: object,
+    right: object,
+    pairs: ActivePairs,
+    skip: (key: ObjectKey) => boolean = () => false
+): boolean {
     const leftKeys = enumerableKeys(left).filter((key) => !skip(key));
     const rightKeys = enumerableKeys(right).filter((key) => !skip(key));
     if (leftKeys.length !== rightKeys.length) {
@@ -238,8 +245,10 @@ function equalsEnumerableProperties(left: object, right: object, pairs: ActivePa
     }
 
     for (const key of leftKeys) {
-        if (!rightKeys.some((rightKey) => rightKey === key)
-            || !equalsValue(Reflect.get(left, key), Reflect.get(right, key), pairs)) {
+        if (
+            !rightKeys.some((rightKey) => rightKey === key) ||
+            !equalsValue(Reflect.get(left, key), Reflect.get(right, key), pairs)
+        ) {
             return false;
         }
     }
@@ -286,8 +295,9 @@ function equalsBytes(left: ArrayBufferLike, right: ArrayBufferLike): boolean {
 }
 
 function isBoxedPrimitive(value: object): boolean {
-    return ['[object Boolean]', '[object BigInt]', '[object Number]', '[object String]', '[object Symbol]']
-        .includes(objectTag(value));
+    return ['[object Boolean]', '[object BigInt]', '[object Number]', '[object String]', '[object Symbol]'].includes(
+        objectTag(value)
+    );
 }
 
 function equalsValue(left: unknown, right: unknown, pairs: ActivePairs): boolean {
@@ -311,98 +321,138 @@ function equalsValue(left: unknown, right: unknown, pairs: ActivePairs): boolean
 
     try {
         if (left instanceof Uint8Array || right instanceof Uint8Array) {
-            if (!(left instanceof Uint8Array) || !(right instanceof Uint8Array)
-                || Object.getPrototypeOf(left) !== Object.getPrototypeOf(right)
-                || left.length !== right.length
-                || !left.every((value, index) => value === right[index])) {
+            if (
+                !(left instanceof Uint8Array) ||
+                !(right instanceof Uint8Array) ||
+                Object.getPrototypeOf(left) !== Object.getPrototypeOf(right) ||
+                left.length !== right.length ||
+                !left.every((value, index) => value === right[index])
+            ) {
                 return false;
             }
             return equalsEnumerableProperties(left, right, pairs, isArrayIndex);
         }
 
         if (ArrayBuffer.isView(left) || ArrayBuffer.isView(right)) {
-            if (!(ArrayBuffer.isView(left) && ArrayBuffer.isView(right))
-                || Object.getPrototypeOf(left) !== Object.getPrototypeOf(right)) {
+            if (
+                !(ArrayBuffer.isView(left) && ArrayBuffer.isView(right)) ||
+                Object.getPrototypeOf(left) !== Object.getPrototypeOf(right)
+            ) {
                 return false;
             }
             if (left instanceof DataView && right instanceof DataView) {
-                return left.byteLength === right.byteLength
-                    && equalsBytes(left.buffer.slice(left.byteOffset, left.byteOffset + left.byteLength), right.buffer.slice(right.byteOffset, right.byteOffset + right.byteLength))
-                    && equalsEnumerableProperties(left, right, pairs);
+                return (
+                    left.byteLength === right.byteLength &&
+                    equalsBytes(
+                        left.buffer.slice(left.byteOffset, left.byteOffset + left.byteLength),
+                        right.buffer.slice(right.byteOffset, right.byteOffset + right.byteLength)
+                    ) &&
+                    equalsEnumerableProperties(left, right, pairs)
+                );
             }
             if (left instanceof DataView || right instanceof DataView) {
                 return false;
             }
-            const leftTyped = left as unknown as {length: number; [index: number]: unknown};
-            const rightTyped = right as unknown as {length: number; [index: number]: unknown};
-            return leftTyped.length === rightTyped.length
-                && Array.from({length: leftTyped.length}, (_, index) => index)
-                    .every((index) => Object.is(leftTyped[index], rightTyped[index]))
-                && equalsEnumerableProperties(left, right, pairs, isArrayIndex);
+            const leftTyped = left as unknown as { length: number; [index: number]: unknown };
+            const rightTyped = right as unknown as { length: number; [index: number]: unknown };
+            return (
+                leftTyped.length === rightTyped.length &&
+                Array.from({ length: leftTyped.length }, (_, index) => index).every((index) =>
+                    Object.is(leftTyped[index], rightTyped[index])
+                ) &&
+                equalsEnumerableProperties(left, right, pairs, isArrayIndex)
+            );
         }
 
-        if (left instanceof ArrayBuffer || isSharedArrayBuffer(left)
-            || right instanceof ArrayBuffer || isSharedArrayBuffer(right)) {
-            return (left instanceof ArrayBuffer) === (right instanceof ArrayBuffer)
-                && isSharedArrayBuffer(left) === isSharedArrayBuffer(right)
-                && equalsBytes(left as ArrayBufferLike, right as ArrayBufferLike)
-                && equalsEnumerableProperties(left, right, pairs);
+        if (
+            left instanceof ArrayBuffer ||
+            isSharedArrayBuffer(left) ||
+            right instanceof ArrayBuffer ||
+            isSharedArrayBuffer(right)
+        ) {
+            return (
+                left instanceof ArrayBuffer === right instanceof ArrayBuffer &&
+                isSharedArrayBuffer(left) === isSharedArrayBuffer(right) &&
+                equalsBytes(left as ArrayBufferLike, right as ArrayBufferLike) &&
+                equalsEnumerableProperties(left, right, pairs)
+            );
         }
 
         if (left instanceof Date || right instanceof Date) {
-            return left instanceof Date
-                && right instanceof Date
-                && Object.getPrototypeOf(left) === Object.getPrototypeOf(right)
-                && Object.is(left.getTime(), right.getTime())
-                && equalsEnumerableProperties(left, right, pairs);
+            return (
+                left instanceof Date &&
+                right instanceof Date &&
+                Object.getPrototypeOf(left) === Object.getPrototypeOf(right) &&
+                Object.is(left.getTime(), right.getTime()) &&
+                equalsEnumerableProperties(left, right, pairs)
+            );
         }
 
         if (left instanceof RegExp || right instanceof RegExp) {
-            return left instanceof RegExp
-                && right instanceof RegExp
-                && Object.getPrototypeOf(left) === Object.getPrototypeOf(right)
-                && left.source === right.source
-                && left.flags === right.flags
-                && left.lastIndex === right.lastIndex
-                && equalsEnumerableProperties(left, right, pairs);
+            return (
+                left instanceof RegExp &&
+                right instanceof RegExp &&
+                Object.getPrototypeOf(left) === Object.getPrototypeOf(right) &&
+                left.source === right.source &&
+                left.flags === right.flags &&
+                left.lastIndex === right.lastIndex &&
+                equalsEnumerableProperties(left, right, pairs)
+            );
         }
 
         if (left instanceof Error || right instanceof Error) {
-            if (!(left instanceof Error) || !(right instanceof Error)
-                || Object.getPrototypeOf(left) !== Object.getPrototypeOf(right)
-                || left.name !== right.name
-                || left.message !== right.message) {
+            if (
+                !(left instanceof Error) ||
+                !(right instanceof Error) ||
+                Object.getPrototypeOf(left) !== Object.getPrototypeOf(right) ||
+                left.name !== right.name ||
+                left.message !== right.message
+            ) {
                 return false;
             }
             const leftHasCause = Object.prototype.hasOwnProperty.call(left, 'cause');
             const rightHasCause = Object.prototype.hasOwnProperty.call(right, 'cause');
-            return leftHasCause === rightHasCause
-                && (!leftHasCause || equalsValue((left as Error & {cause?: unknown}).cause, (right as Error & {cause?: unknown}).cause, pairs))
-                && equalsEnumerableProperties(left, right, pairs);
+            return (
+                leftHasCause === rightHasCause &&
+                (!leftHasCause ||
+                    equalsValue(
+                        (left as Error & { cause?: unknown }).cause,
+                        (right as Error & { cause?: unknown }).cause,
+                        pairs
+                    )) &&
+                equalsEnumerableProperties(left, right, pairs)
+            );
         }
 
         if (isBoxedPrimitive(left) || isBoxedPrimitive(right)) {
-            return isBoxedPrimitive(left)
-                && isBoxedPrimitive(right)
-                && objectTag(left) === objectTag(right)
-                && Object.is(left.valueOf(), right.valueOf())
-                && equalsEnumerableProperties(left, right, pairs);
+            return (
+                isBoxedPrimitive(left) &&
+                isBoxedPrimitive(right) &&
+                objectTag(left) === objectTag(right) &&
+                Object.is(left.valueOf(), right.valueOf()) &&
+                equalsEnumerableProperties(left, right, pairs)
+            );
         }
 
         if (left instanceof Set || right instanceof Set) {
-            return left instanceof Set
-                && right instanceof Set
-                && Object.getPrototypeOf(left) === Object.getPrototypeOf(right)
-                && equalsUnordered(Array.from(left), Array.from(right), pairs, (a, b, state) => {
+            return (
+                left instanceof Set &&
+                right instanceof Set &&
+                Object.getPrototypeOf(left) === Object.getPrototypeOf(right) &&
+                equalsUnordered(Array.from(left), Array.from(right), pairs, (a, b, state) => {
                     return equalsValue(a, b, state);
-                })
-                && equalsEnumerableProperties(left, right, pairs);
+                }) &&
+                equalsEnumerableProperties(left, right, pairs)
+            );
         }
 
         if (left instanceof Map || right instanceof Map) {
-            if (!(left instanceof Map) || !(right instanceof Map)
-                || Object.getPrototypeOf(left) !== Object.getPrototypeOf(right)
-                || left.size !== right.size) {
+            if (
+                !(left instanceof Map) ||
+                !(right instanceof Map) ||
+                Object.getPrototypeOf(left) !== Object.getPrototypeOf(right) ||
+                left.size !== right.size
+            ) {
                 return false;
             }
 
@@ -430,23 +480,32 @@ function equalsValue(left: unknown, right: unknown, pairs: ActivePairs): boolean
         }
 
         if (Array.isArray(left) || Array.isArray(right)) {
-            if (!Array.isArray(left) || !Array.isArray(right)
-                || Object.getPrototypeOf(left) !== Object.getPrototypeOf(right)
-                || left.length !== right.length) {
+            if (
+                !Array.isArray(left) ||
+                !Array.isArray(right) ||
+                Object.getPrototypeOf(left) !== Object.getPrototypeOf(right) ||
+                left.length !== right.length
+            ) {
                 return false;
             }
             for (let index = 0; index < left.length; index++) {
                 const leftHasValue = Object.prototype.hasOwnProperty.call(left, index);
                 const rightHasValue = Object.prototype.hasOwnProperty.call(right, index);
-                if (leftHasValue !== rightHasValue || (leftHasValue && !equalsValue(left[index], right[index], pairs))) {
+                if (
+                    leftHasValue !== rightHasValue ||
+                    (leftHasValue && !equalsValue(left[index], right[index], pairs))
+                ) {
                     return false;
                 }
             }
             return equalsEnumerableProperties(left, right, pairs, isArrayIndex);
         }
 
-        if (objectTag(left) !== '[object Object]' || objectTag(right) !== '[object Object]'
-            || Object.getPrototypeOf(left) !== Object.getPrototypeOf(right)) {
+        if (
+            objectTag(left) !== '[object Object]' ||
+            objectTag(right) !== '[object Object]' ||
+            Object.getPrototypeOf(left) !== Object.getPrototypeOf(right)
+        ) {
             return false;
         }
         return equalsEnumerableProperties(left, right, pairs);

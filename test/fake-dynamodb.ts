@@ -1,17 +1,19 @@
-import {DynamoDBClient} from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 
 export interface FakeDynamoDB {
     db: DynamoDBClient;
     inputs: any[];
-    options: {abortSignal?: AbortSignal}[];
+    options: { abortSignal?: AbortSignal }[];
 }
 
-export function createFakeDynamoDB(respond: (command: any, attempt: number, options?: {abortSignal?: AbortSignal}) => any = () => ({})): FakeDynamoDB {
+export function createFakeDynamoDB(
+    respond: (command: any, attempt: number, options?: { abortSignal?: AbortSignal }) => any = () => ({})
+): FakeDynamoDB {
     const inputs: any[] = [];
-    const options: {abortSignal?: AbortSignal}[] = [];
+    const options: { abortSignal?: AbortSignal }[] = [];
     let attempt = 0;
     const db = {
-        send: async (command: any, requestOptions: {abortSignal?: AbortSignal} = {}) => {
+        send: async (command: any, requestOptions: { abortSignal?: AbortSignal } = {}) => {
             options.push(requestOptions);
             inputs.push(command.input);
             attempt++;
@@ -19,5 +21,5 @@ export function createFakeDynamoDB(respond: (command: any, attempt: number, opti
         }
     } as unknown as DynamoDBClient;
 
-    return {db, inputs, options};
+    return { db, inputs, options };
 }

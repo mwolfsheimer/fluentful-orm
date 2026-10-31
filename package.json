@@ -43,6 +43,10 @@
     "build": "tsc --project tsconfig.build.json",
     "clean": "node -e \"require('node:fs').rmSync('dist', {recursive: true, force: true})\"",
     "typecheck": "tsc --project tsconfig.json --noEmit",
+    "format": "prettier --write \"**/*.{ts,mts,cts}\"",
+    "format:check": "prettier --check \"**/*.{ts,mts,cts}\"",
+    "format:staged": "lint-staged",
+    "prepare": "husky",
     "test": "npm run build && npm run test:unit && npm run test:memory",
     "test:unit": "node --require ts-node/register test/unit.test.ts",
     "test:memory": "node --require ts-node/register test/memory.test.ts",
@@ -69,7 +73,13 @@
     "zod": "^4.6.5",
     "vitepress": "1.6.4",
     "markdown-it": "15.0.2",
-    "github-slugger": "2.0.0"
+    "github-slugger": "2.0.0",
+    "husky": "9.1.7",
+    "lint-staged": "16.4.0",
+    "prettier": "3.9.10"
+  },
+  "lint-staged": {
+    "*.{ts,mts,cts}": "prettier --write"
   },
   "overrides": {
     "vitepress": {

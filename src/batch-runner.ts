@@ -11,43 +11,50 @@ export async function runBatchChunks<TDocument, TResult>(
     }
 
     signal?.throwIfAborted();
+
     const chunks: TDocument[][] = [];
+    const workers: Promise<void>[] = [];
+    let nextChunkIndex = 0;
+    let hasFailed = false;
+
     for (let chunkIndex = 0; chunkIndex < documents.length; chunkIndex += chunkSize) {
         chunks.push(documents.slice(chunkIndex, chunkIndex + chunkSize));
     }
 
     const results = new Array<TResult>(chunks.length);
-    let nextChunk = 0;
-    let failed = false;
     const runWorker = async () => {
-        while (!failed) {
+        while (!hasFailed) {
             if (signal?.aborted) {
-                failed = true;
+                hasFailed = true;
                 throw signal.reason;
             }
-            const chunkIndex = nextChunk++;
+
+            // Claim the index before awaiting so workers never submit the same chunk.
+            const chunkIndex = nextChunkIndex++;
             if (chunkIndex >= chunks.length) {
                 return;
             }
+
             try {
                 results[chunkIndex] = await worker(chunks[chunkIndex]);
             } catch (error) {
-                failed = true;
+                hasFailed = true;
                 throw error;
             }
         }
     };
 
-    const workers: Promise<void>[] = [];
     const workerCount = Math.min(concurrency, chunks.length);
     for (let workerIndex = 0; workerIndex < workerCount; workerIndex++) {
         workers.push(runWorker());
     }
 
+    // Let in-flight work settle before reporting failure so recovery includes its outcome.
     const settled = await Promise.allSettled(workers);
     const failure = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected');
     if (failure) {
         throw failure.reason;
     }
+
     return results;
 }

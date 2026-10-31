@@ -1,7 +1,7 @@
-import type {AttributeValue, BatchGetItemCommandInput, BatchWriteItemCommandInput} from "@aws-sdk/client-dynamodb";
-import type {ExpressionBuilder, ExpressionTarget} from "./expression-builder";
-import type {QueryOperation} from "./query-operation";
-import type {IndexKind, ReturnConsumedCapacity} from "./types";
+import type { AttributeValue, BatchGetItemCommandInput, BatchWriteItemCommandInput } from '@aws-sdk/client-dynamodb';
+import type { ExpressionBuilder, ExpressionTarget } from './expression-builder';
+import type { QueryOperation } from './query-operation';
+import type { IndexKind, ReturnConsumedCapacity } from './types';
 
 type AttributeMap = Record<string, AttributeValue>;
 type BatchGetRequestItems = NonNullable<BatchGetItemCommandInput['RequestItems']>;
@@ -25,7 +25,7 @@ export class QueryRequestState {
     startPut(tableName: string, item: AttributeMap): void {
         this.operation = {
             kind: 'putItem',
-            input: {ReturnConsumedCapacity: 'INDEXES', TableName: tableName, Item: item}
+            input: { ReturnConsumedCapacity: 'INDEXES', TableName: tableName, Item: item }
         };
     }
 
@@ -39,8 +39,13 @@ export class QueryRequestState {
 
     /** Requests approximate item-collection size estimates for a write operation. */
     setReturnItemCollectionMetrics(value: 'NONE' | 'SIZE'): void {
-        if (this.operation === null || (this.operation.kind !== 'putItem' && this.operation.kind !== 'updateItem'
-            && this.operation.kind !== 'deleteItem' && this.operation.kind !== 'batchWriteItem')) {
+        if (
+            this.operation === null ||
+            (this.operation.kind !== 'putItem' &&
+                this.operation.kind !== 'updateItem' &&
+                this.operation.kind !== 'deleteItem' &&
+                this.operation.kind !== 'batchWriteItem')
+        ) {
             throw new Error('Item collection metrics require a write operation');
         }
         this.operation.input.ReturnItemCollectionMetrics = value;
@@ -50,7 +55,7 @@ export class QueryRequestState {
     startBatchWrite(requestItems: BatchWriteRequestItems): void {
         this.operation = {
             kind: 'batchWriteItem',
-            input: {ReturnConsumedCapacity: 'INDEXES', RequestItems: requestItems}
+            input: { ReturnConsumedCapacity: 'INDEXES', RequestItems: requestItems }
         };
     }
 
@@ -58,7 +63,7 @@ export class QueryRequestState {
     startDelete(tableName: string, key: AttributeMap): void {
         this.operation = {
             kind: 'deleteItem',
-            input: {ReturnConsumedCapacity: 'INDEXES', TableName: tableName, ReturnValues: 'ALL_OLD', Key: key}
+            input: { ReturnConsumedCapacity: 'INDEXES', TableName: tableName, ReturnValues: 'ALL_OLD', Key: key }
         };
     }
 
@@ -66,7 +71,7 @@ export class QueryRequestState {
     startConditionCheck(tableName: string, key: AttributeMap): void {
         this.operation = {
             kind: 'conditionCheck',
-            input: {TableName: tableName, Key: key}
+            input: { TableName: tableName, Key: key }
         };
     }
 
@@ -74,7 +79,7 @@ export class QueryRequestState {
     startUpdate(tableName: string, key: AttributeMap): void {
         this.operation = {
             kind: 'updateItem',
-            input: {ReturnConsumedCapacity: 'INDEXES', TableName: tableName, ReturnValues: 'ALL_NEW', Key: key}
+            input: { ReturnConsumedCapacity: 'INDEXES', TableName: tableName, ReturnValues: 'ALL_NEW', Key: key }
         };
     }
 
@@ -82,7 +87,7 @@ export class QueryRequestState {
     startGet(tableName: string, key: AttributeMap, consistentRead: boolean): void {
         this.operation = {
             kind: 'getItem',
-            input: {ReturnConsumedCapacity: 'INDEXES', TableName: tableName, Key: key, ConsistentRead: consistentRead}
+            input: { ReturnConsumedCapacity: 'INDEXES', TableName: tableName, Key: key, ConsistentRead: consistentRead }
         };
     }
 
@@ -90,7 +95,7 @@ export class QueryRequestState {
     startBatchGet(requestItems: BatchGetRequestItems): void {
         this.operation = {
             kind: 'batchGetItem',
-            input: {ReturnConsumedCapacity: 'INDEXES', RequestItems: requestItems}
+            input: { ReturnConsumedCapacity: 'INDEXES', RequestItems: requestItems }
         };
     }
 
@@ -98,7 +103,7 @@ export class QueryRequestState {
     startScan(tableName: string, consistentRead: boolean): void {
         this.operation = {
             kind: 'scan',
-            input: {ReturnConsumedCapacity: 'INDEXES', TableName: tableName, ConsistentRead: consistentRead}
+            input: { ReturnConsumedCapacity: 'INDEXES', TableName: tableName, ConsistentRead: consistentRead }
         };
     }
 
@@ -117,7 +122,13 @@ export class QueryRequestState {
 
     /** Reports whether a primary-key field is already configured. */
     hasKey(name: string): boolean {
-        if (this.operation === null || (this.operation.kind !== 'updateItem' && this.operation.kind !== 'getItem' && this.operation.kind !== 'deleteItem' && this.operation.kind !== 'conditionCheck')) {
+        if (
+            this.operation === null ||
+            (this.operation.kind !== 'updateItem' &&
+                this.operation.kind !== 'getItem' &&
+                this.operation.kind !== 'deleteItem' &&
+                this.operation.kind !== 'conditionCheck')
+        ) {
             return false;
         }
 
@@ -143,11 +154,16 @@ export class QueryRequestState {
 
     /** Requests strongly consistent reads where DynamoDB supports them. */
     setConsistentRead(): void {
-        if (this.operation === null || (this.operation.kind !== 'getItem' && this.operation.kind !== 'query' && this.operation.kind !== 'scan')) {
+        if (
+            this.operation === null ||
+            (this.operation.kind !== 'getItem' && this.operation.kind !== 'query' && this.operation.kind !== 'scan')
+        ) {
             throw new Error('Consistent reads require a get, query, or scan operation');
         }
         if ((this.operation.kind === 'query' || this.operation.kind === 'scan') && this.indexKind === 'global') {
-            throw new Error(`Global secondary index ${this.operation.input.IndexName} does not support consistent reads`);
+            throw new Error(
+                `Global secondary index ${this.operation.input.IndexName} does not support consistent reads`
+            );
         }
         this.operation.input.ConsistentRead = true;
     }
@@ -170,7 +186,14 @@ export class QueryRequestState {
         if (this.operation === null || this.operation.kind !== 'scan') {
             throw new Error('Parallel scans require a scan operation');
         }
-        if (!Number.isInteger(totalSegments) || totalSegments < 1 || totalSegments > 1000000 || !Number.isInteger(segment) || segment < 0 || segment >= totalSegments) {
+        if (
+            !Number.isInteger(totalSegments) ||
+            totalSegments < 1 ||
+            totalSegments > 1000000 ||
+            !Number.isInteger(segment) ||
+            segment < 0 ||
+            segment >= totalSegments
+        ) {
             throw new Error('Parallel scan segment must be a non-negative integer less than totalSegments');
         }
         this.operation.input.Segment = segment;
@@ -186,7 +209,10 @@ export class QueryRequestState {
 
     /** Sets the projected attributes for a query or scan. */
     setProjection(attributes: string[]): void {
-        if (this.operation !== null && (this.operation.kind === 'query' || this.operation.kind === 'scan' || this.operation.kind === 'getItem')) {
+        if (
+            this.operation !== null &&
+            (this.operation.kind === 'query' || this.operation.kind === 'scan' || this.operation.kind === 'getItem')
+        ) {
             this.operation.input.ProjectionExpression = attributes.join(', ');
         }
     }
@@ -232,8 +258,12 @@ export class QueryRequestState {
     /** Returns the assembled operation, validating incompatible modifiers. */
     getOperation(): QueryOperation | null {
         if (this.conditionFailureReturnValues !== null && this.operation !== null) {
-            if (this.operation.kind !== 'putItem' && this.operation.kind !== 'updateItem'
-                && this.operation.kind !== 'deleteItem' && this.operation.kind !== 'conditionCheck') {
+            if (
+                this.operation.kind !== 'putItem' &&
+                this.operation.kind !== 'updateItem' &&
+                this.operation.kind !== 'deleteItem' &&
+                this.operation.kind !== 'conditionCheck'
+            ) {
                 throw new Error('Condition failure return values require a single-item write');
             }
             this.operation.input.ReturnValuesOnConditionCheckFailure = this.conditionFailureReturnValues;

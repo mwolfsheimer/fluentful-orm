@@ -1,34 +1,80 @@
-import type {SetOperand} from './update-expression';
-import {isUpdateExpression} from './update-expression';
-import {ExecutionBinding} from './execution-options';
-import type {ExecutionOptions} from './types';
-import {ConditionalCheckFailedException} from "@aws-sdk/client-dynamodb";
-import type {DynamoDBClient, TransactWriteItem} from "@aws-sdk/client-dynamodb";
-import type {TableDescription} from "@aws-sdk/client-dynamodb";
-import {runBatchChunks} from "./batch-runner";
-import {ExpressionBuilder} from "./expression-builder";
-import {isAttributeReference, pathSegments, uniquePaths} from './document-path';
-import type {AttributePath} from './document-path';
-import {collectPredicates, predicateComparison} from './predicate';
-import type {PredicateCallback} from './predicate';
-import {QueryExecutor} from "./query-executor";
-import type {BatchObserver, BatchRequestItems} from './query-executor';
-import type {BatchOutcome} from './types';
-import {QueryRequestState} from "./query-request-state";
-import {QueryTableAdmin, keyComponents} from "./query-table-admin";
-import type {DynamoDBTableDefinition, DynamoDBIndexDefinition, TablePageOptions, TablePage, TableWaitOptions, TableCreateOptions} from "./query-table-admin";
-import {QuerySerializer} from "./query-serializer";
-import {TransactionReadBuilder} from './transaction-read-builder';
-import {TransactionWriteBuilder} from "./transaction-write-builder";
+import type { SetOperand } from './update-expression';
+import { isUpdateExpression } from './update-expression';
+import { ExecutionBinding } from './execution-options';
+import type { ExecutionOptions } from './types';
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
+import type { DynamoDBClient, TransactWriteItem } from '@aws-sdk/client-dynamodb';
+import type { TableDescription } from '@aws-sdk/client-dynamodb';
+import { runBatchChunks } from './batch-runner';
+import { ExpressionBuilder } from './expression-builder';
+import { isAttributeReference, pathSegments, uniquePaths } from './document-path';
+import type { AttributePath } from './document-path';
+import { collectPredicates, predicateComparison } from './predicate';
+import type { PredicateCallback } from './predicate';
+import { QueryExecutor } from './query-executor';
+import type { BatchObserver, BatchRequestItems } from './query-executor';
+import type { BatchOutcome } from './types';
+import { QueryRequestState } from './query-request-state';
+import { QueryTableAdmin, keyComponents } from './query-table-admin';
+import type {
+    DynamoDBTableDefinition,
+    DynamoDBIndexDefinition,
+    TablePageOptions,
+    TablePage,
+    TableWaitOptions,
+    TableCreateOptions
+} from './query-table-admin';
+import { QuerySerializer } from './query-serializer';
+import { TransactionReadBuilder } from './transaction-read-builder';
+import { TransactionWriteBuilder } from './transaction-write-builder';
 
-import type {TransactionItemOptions} from "./transaction-write-builder";
+import type { TransactionItemOptions } from './transaction-write-builder';
 type Binary = Uint8Array;
-import {defineTable as defineTypedTable} from "./typed-table";
-import {UpdateExpressionType} from "./types";
-import type {ConditionalWriteResult} from "./types";
-import type {AddSubQuery, BatchGetOptions, BatchOptions, BatchWriteOptions, ConditionCheckNotWhereQuery, ConditionCheckQuery, ConditionFailureReturnOptions, CountFinal, CreateDocumentWith, CreateNotWhereQuery, CreateQuery, DeleteDocumentWith, DeleteNotWhereQuery, DeleteQuery, DynamoResponse, Final, GenericDocument, GetDocumentSelector, GetDocumentWith, GetSelector, IndexKind, PageOptions, Query, QueryCursor, QueryDocument, QueryPage, QueryScanWhereSubQuery, ReturnConsumedCapacity, Scan, SetSubQuery, SubQuery, UpdateDocumentSelector, UpdateDocumentWith, UpdateEqQuery, UpdateNotWhereQuery, UpdateQuery, UpdateSubQuery, UpdateWithQuery} from "./types";
-import {ValueUtils} from "./value-utils";
-import {assertDynamoKeyValue, compareDynamoValues} from "./dynamodb-values";
+import { defineTable as defineTypedTable } from './typed-table';
+import { UpdateExpressionType } from './types';
+import type { ConditionalWriteResult } from './types';
+import type {
+    AddSubQuery,
+    BatchGetOptions,
+    BatchOptions,
+    BatchWriteOptions,
+    ConditionCheckNotWhereQuery,
+    ConditionCheckQuery,
+    ConditionFailureReturnOptions,
+    CountFinal,
+    CreateDocumentWith,
+    CreateNotWhereQuery,
+    CreateQuery,
+    DeleteDocumentWith,
+    DeleteNotWhereQuery,
+    DeleteQuery,
+    DynamoResponse,
+    Final,
+    GenericDocument,
+    GetDocumentSelector,
+    GetDocumentWith,
+    GetSelector,
+    IndexKind,
+    PageOptions,
+    Query,
+    QueryCursor,
+    QueryDocument,
+    QueryPage,
+    QueryScanWhereSubQuery,
+    ReturnConsumedCapacity,
+    Scan,
+    SetSubQuery,
+    SubQuery,
+    UpdateDocumentSelector,
+    UpdateDocumentWith,
+    UpdateEqQuery,
+    UpdateNotWhereQuery,
+    UpdateQuery,
+    UpdateSubQuery,
+    UpdateWithQuery
+} from './types';
+import { ValueUtils } from './value-utils';
+import { assertDynamoKeyValue, compareDynamoValues } from './dynamodb-values';
 
 let requestId = '0';
 
@@ -51,19 +97,24 @@ export class QueryBuilder {
     private queryKeys = new Set<string>();
     private sortKeyAdded = false;
     private indexSortFields: readonly string[] | null = null;
-    private queryIndex: {name: string; kind: IndexKind} | null = null;
+    private queryIndex: { name: string; kind: IndexKind } | null = null;
     private indexSortPosition = 0;
 
     /** Creates a builder for one table and optionally supplies a result parser. */
     constructor(
         private tableName: string,
         private dynamoDB: DynamoDBClient,
-        private documentParser: null | ((document: unknown, projection?: readonly AttributePath[] | null, partial?: boolean) => GenericDocument<any>) = null,
+        private documentParser:
+            | null
+            | ((
+                  document: unknown,
+                  projection?: readonly AttributePath[] | null,
+                  partial?: boolean
+              ) => GenericDocument<any>) = null,
         private inputParser = documentParser
     ) {}
 
     private with(doc: UpdateDocumentWith): UpdateWithQuery {
-
         doc = ValueUtils.clone(doc);
         this.applyModifiedTimestamp();
 
@@ -81,8 +132,10 @@ export class QueryBuilder {
     }
 
     private assign(attribute: AttributePath, operand: SetOperand): UpdateSubQuery {
-        if (!isAttributeReference(operand) && !isUpdateExpression(operand)) throw new Error('assign requires a structured SET operand');
-        if (this.request.hasKey(pathSegments(attribute)[0] as string)) throw new Error('Primary key attributes cannot be updated');
+        if (!isAttributeReference(operand) && !isUpdateExpression(operand))
+            throw new Error('assign requires a structured SET operand');
+        if (this.request.hasKey(pathSegments(attribute)[0] as string))
+            throw new Error('Primary key attributes cannot be updated');
         this.expressions.addAssignment(attribute, operand);
         this.applyModifiedTimestamp();
         return this.updateSubQuery();
@@ -96,13 +149,15 @@ export class QueryBuilder {
 
     private set_add(attribute: string): AddSubQuery {
         return {
-            eq: (val: Set<string | number | Binary> | number): UpdateSubQuery => this.applyUpdate(UpdateExpressionType.ADD, attribute, val)
+            eq: (val: Set<string | number | Binary> | number): UpdateSubQuery =>
+                this.applyUpdate(UpdateExpressionType.ADD, attribute, val)
         };
     }
 
     private set_delete(attribute: string): UpdateEqQuery {
         return {
-            eq: (val: Set<string | number | Binary>): UpdateSubQuery => this.applyUpdate(UpdateExpressionType.DELETE, attribute, val)
+            eq: (val: Set<string | number | Binary>): UpdateSubQuery =>
+                this.applyUpdate(UpdateExpressionType.DELETE, attribute, val)
         };
     }
 
@@ -111,7 +166,8 @@ export class QueryBuilder {
     }
 
     private applyUpdate(type: UpdateExpressionType, attribute: AttributePath, value?: unknown): UpdateSubQuery {
-        if (isAttributeReference(value) || isUpdateExpression(value)) throw new Error('Structured operands require assign, not literal update assignments');
+        if (isAttributeReference(value) || isUpdateExpression(value))
+            throw new Error('Structured operands require assign, not literal update assignments');
         const segments = pathSegments(attribute);
         if (this.request.hasKey(segments[0] as string)) throw new Error('Primary key attributes cannot be updated');
         if ((type === UpdateExpressionType.ADD || type === UpdateExpressionType.DELETE) && segments.length !== 1) {
@@ -176,8 +232,7 @@ export class QueryBuilder {
 
     /** Starts a conditional PutItem operation. */
     public create(doc: CreateDocumentWith): CreateQuery {
-
-        doc = ValueUtils.clone(doc)
+        doc = ValueUtils.clone(doc);
 
         if (this._writeTimestamps) {
             (doc as any).createdAt = Date.now();
@@ -198,13 +253,15 @@ export class QueryBuilder {
         const items = docs.map((doc) => QuerySerializer.serialiseMap(doc));
         this._docs = this._docs.concat(items.map((item) => QuerySerializer.parseItem(item)));
 
-        const requestItems = {[this.tableName]: items.map((item) => {
-            return {
-                PutRequest: {
-                    Item: item
-                }
-            };
-        })};
+        const requestItems = {
+            [this.tableName]: items.map((item) => {
+                return {
+                    PutRequest: {
+                        Item: item
+                    }
+                };
+            })
+        };
         this.request.startBatchWrite(requestItems);
 
         return this;
@@ -217,32 +274,41 @@ export class QueryBuilder {
             docs = ValueUtils.clone(docs) as CreateDocumentWith[];
             if (this._writeTimestamps) {
                 const now = Date.now();
-                docs.forEach(doc => { doc['createdAt'] = now; });
+                docs.forEach((doc) => {
+                    doc['createdAt'] = now;
+                });
             }
-            if (this.inputParser !== null) docs = docs.map(doc => this.inputParser!(doc));
-            docs.forEach(doc => QuerySerializer.serialiseMap(doc));
+            if (this.inputParser !== null) docs = docs.map((doc) => this.inputParser!(doc));
+            docs.forEach((doc) => QuerySerializer.serialiseMap(doc));
         } catch (error) {
             return Promise.reject(error);
         }
-        return runBatchChunks(docs, 25, concurrency, (chunk) => {
-            const builder = new QueryBuilder(this.tableName, this.dynamoDB, this.documentParser, this.inputParser)
-                .logger(this._logger)
-                .timestamps(this._writeTimestamps)
-                .createBatchWorker(chunk);
-            if (typeof options !== 'boolean') {
-                builder.returnCapacity(options.returnConsumedCapacity);
-                if (options.returnItemCollectionMetrics === 'SIZE') {
-                    builder.returnItemCollectionMetrics();
+        return runBatchChunks(
+            docs,
+            25,
+            concurrency,
+            (chunk) => {
+                const builder = new QueryBuilder(this.tableName, this.dynamoDB, this.documentParser, this.inputParser)
+                    .logger(this._logger)
+                    .timestamps(this._writeTimestamps)
+                    .createBatchWorker(chunk);
+                if (typeof options !== 'boolean') {
+                    builder.returnCapacity(options.returnConsumedCapacity);
+                    if (options.returnItemCollectionMetrics === 'SIZE') {
+                        builder.returnItemCollectionMetrics();
+                    }
                 }
-            }
-            return builder.toPromise<T[]>(typeof options === 'boolean' ? {} : options);
-        }, typeof options === 'boolean' ? undefined : options.signal)
-            .then((result) => result.flat(1) as T[]);
+                return builder.toPromise<T[]>(typeof options === 'boolean' ? {} : options);
+            },
+            typeof options === 'boolean' ? undefined : options.signal
+        ).then((result) => result.flat(1) as T[]);
     }
 
     /** Starts a DeleteItem operation for the supplied primary key. */
     public delete(doc: DeleteDocumentWith): DeleteQuery {
-        const key = Object.fromEntries(Object.keys(doc).map(name => [name, QuerySerializer.serialiseItem(doc[name])]));
+        const key = Object.fromEntries(
+            Object.keys(doc).map((name) => [name, QuerySerializer.serialiseItem(doc[name])])
+        );
         this.request.startDelete(this.tableName, key);
 
         return this.deleteQueryResult();
@@ -250,20 +316,24 @@ export class QueryBuilder {
 
     /** Starts a condition-check operation for the supplied primary key. */
     public conditionCheck(doc: GetDocumentSelector): ConditionCheckQuery {
-        const key = Object.fromEntries(Object.keys(doc).map(name => [name, QuerySerializer.serialiseItem(doc[name])]));
+        const key = Object.fromEntries(
+            Object.keys(doc).map((name) => [name, QuerySerializer.serialiseItem(doc[name])])
+        );
         this.request.startConditionCheck(this.tableName, key);
 
         return this.conditionCheckQueryResult();
     }
 
     private deleteBatchWorker(docs: CreateDocumentWith[]): QueryBuilder {
-        const requestItems = {[this.tableName]: docs.map((item) => {
-            return {
-                DeleteRequest: {
-                    Key: QuerySerializer.serialiseMap(item)
-                }
-            };
-        })};
+        const requestItems = {
+            [this.tableName]: docs.map((item) => {
+                return {
+                    DeleteRequest: {
+                        Key: QuerySerializer.serialiseMap(item)
+                    }
+                };
+            })
+        };
         this.request.startBatchWrite(requestItems);
 
         return this;
@@ -272,24 +342,32 @@ export class QueryBuilder {
     /** Deletes records in batches of 25 with configurable concurrency. */
     public deleteBatch<T>(docs: DeleteDocumentWith[], options: BatchWriteOptions | boolean = {}): Promise<void> {
         docs = ValueUtils.clone(docs) as CreateDocumentWith[];
-        return runBatchChunks(docs, 25, this.batchConcurrency(options), (chunk) => {
-            const builder = new QueryBuilder(this.tableName, this.dynamoDB, this.documentParser)
-                .logger(this._logger)
-                .timestamps(this._writeTimestamps)
-                .deleteBatchWorker(chunk);
-            if (typeof options !== 'boolean') {
-                builder.returnCapacity(options.returnConsumedCapacity);
-                if (options.returnItemCollectionMetrics === 'SIZE') {
-                    builder.returnItemCollectionMetrics();
+        return runBatchChunks(
+            docs,
+            25,
+            this.batchConcurrency(options),
+            (chunk) => {
+                const builder = new QueryBuilder(this.tableName, this.dynamoDB, this.documentParser)
+                    .logger(this._logger)
+                    .timestamps(this._writeTimestamps)
+                    .deleteBatchWorker(chunk);
+                if (typeof options !== 'boolean') {
+                    builder.returnCapacity(options.returnConsumedCapacity);
+                    if (options.returnItemCollectionMetrics === 'SIZE') {
+                        builder.returnItemCollectionMetrics();
+                    }
                 }
-            }
-            return builder.toPromise(typeof options === 'boolean' ? {} : options);
-        }, typeof options === 'boolean' ? undefined : options.signal).then(() => undefined);
+                return builder.toPromise(typeof options === 'boolean' ? {} : options);
+            },
+            typeof options === 'boolean' ? undefined : options.signal
+        ).then(() => undefined);
     }
 
     /** Starts an UpdateItem operation for the supplied primary key. */
     public update(doc: UpdateDocumentSelector): UpdateQuery {
-        const key = Object.fromEntries(Object.keys(doc).map(name => [name, QuerySerializer.serialiseItem(doc[name])]));
+        const key = Object.fromEntries(
+            Object.keys(doc).map((name) => [name, QuerySerializer.serialiseItem(doc[name])])
+        );
         this.request.startUpdate(this.tableName, key);
 
         return this.updateQuery();
@@ -297,18 +375,24 @@ export class QueryBuilder {
 
     /** Starts a GetItem operation for the supplied primary key. */
     public get(doc: GetDocumentSelector): QueryBuilder {
-        const key = Object.fromEntries(Object.keys(doc).map(name => [name, QuerySerializer.serialiseItem(doc[name])]));
+        const key = Object.fromEntries(
+            Object.keys(doc).map((name) => [name, QuerySerializer.serialiseItem(doc[name])])
+        );
         this.request.startGet(this.tableName, key, false);
 
-        return this
+        return this;
     }
 
-    private getBatchWorker(keys: GenericDocument<GetSelector>[], consistentRead = false, select?: AttributePath[]): QueryBuilder {
+    private getBatchWorker(
+        keys: GenericDocument<GetSelector>[],
+        consistentRead = false,
+        select?: AttributePath[]
+    ): QueryBuilder {
         const unique = select === undefined ? undefined : uniquePaths(select);
         if (unique !== undefined) {
             this._projection = unique;
         }
-        const request = {ConsistentRead: consistentRead, Keys: keys} as {
+        const request = { ConsistentRead: consistentRead, Keys: keys } as {
             ConsistentRead: boolean;
             Keys: GenericDocument<GetSelector>[];
             ProjectionExpression?: string;
@@ -319,9 +403,9 @@ export class QueryBuilder {
             request.ProjectionExpression = unique.map((attribute) => expressions.addPath(attribute)).join(', ');
             expressions.applyTo(request);
         }
-        this.request.startBatchGet({[this.tableName]: request});
+        this.request.startBatchGet({ [this.tableName]: request });
 
-        return this
+        return this;
     }
 
     /** Reads records in batches of 100, deduplicating duplicate keys before sending requests. */
@@ -333,10 +417,14 @@ export class QueryBuilder {
         const serialisedKeys: GenericDocument<GetSelector>[] = [];
         docs.forEach((doc) => {
             const serialised = QuerySerializer.serialiseMap(doc);
-            const canonical = JSON.stringify(Object.keys(serialised).sort().map((key) => {
-                const value = serialised[key];
-                return [key, 'B' in value ? {B: Array.from(value.B)} : value];
-            }));
+            const canonical = JSON.stringify(
+                Object.keys(serialised)
+                    .sort()
+                    .map((key) => {
+                        const value = serialised[key];
+                        return [key, 'B' in value ? { B: Array.from(value.B) } : value];
+                    })
+            );
 
             if (seenKeys.has(canonical)) {
                 return;
@@ -348,101 +436,157 @@ export class QueryBuilder {
 
         const batchOptions: BatchGetOptions = typeof options === 'boolean' ? {} : options;
         const readConsistency = batchOptions.consistentRead === true;
-        return runBatchChunks(serialisedKeys, 100, this.batchConcurrency(options), (chunk) => {
-            const builder = new QueryBuilder(this.tableName, this.dynamoDB, this.documentParser)
-                .logger(this._logger)
-                .timestamps(this._writeTimestamps)
-                .getBatchWorker(chunk, readConsistency, batchOptions.select);
-            builder.returnCapacity(batchOptions.returnConsumedCapacity);
-            return builder.toPromise<T[]>(typeof options === 'boolean' ? {} : options);
-        }, batchOptions.signal).then((result) => result.flat(1));
+        return runBatchChunks(
+            serialisedKeys,
+            100,
+            this.batchConcurrency(options),
+            (chunk) => {
+                const builder = new QueryBuilder(this.tableName, this.dynamoDB, this.documentParser)
+                    .logger(this._logger)
+                    .timestamps(this._writeTimestamps)
+                    .getBatchWorker(chunk, readConsistency, batchOptions.select);
+                builder.returnCapacity(batchOptions.returnConsumedCapacity);
+                return builder.toPromise<T[]>(typeof options === 'boolean' ? {} : options);
+            },
+            batchOptions.signal
+        ).then((result) => result.flat(1));
     }
 
     /** Reads batches with aggregate recovery information; missing records count as completed work. */
-    public getBatchResult<T>(docs: GetDocumentWith[], options: BatchGetOptions = {}): Promise<BatchOutcome<GetDocumentWith, T>> {
+    public getBatchResult<T>(
+        docs: GetDocumentWith[],
+        options: BatchGetOptions = {}
+    ): Promise<BatchOutcome<GetDocumentWith, T>> {
         return this.recoverBatch<GetDocumentWith, T>('get', docs, options);
     }
 
     /** Writes batches without automatically retrying work whose service outcome is unknown. */
-    public createBatchResult<T = CreateDocumentWith>(docs: CreateDocumentWith[], options: BatchWriteOptions = {}): Promise<BatchOutcome<CreateDocumentWith, T>> {
+    public createBatchResult<T = CreateDocumentWith>(
+        docs: CreateDocumentWith[],
+        options: BatchWriteOptions = {}
+    ): Promise<BatchOutcome<CreateDocumentWith, T>> {
         return this.recoverBatch<CreateDocumentWith, T>('create', docs, options);
     }
 
     /** Deletes batches while retaining confirmed, unprocessed, unsent, and uncertain work. */
-    public deleteBatchResult(docs: DeleteDocumentWith[], options: BatchWriteOptions = {}): Promise<BatchOutcome<DeleteDocumentWith, never>> {
+    public deleteBatchResult(
+        docs: DeleteDocumentWith[],
+        options: BatchWriteOptions = {}
+    ): Promise<BatchOutcome<DeleteDocumentWith, never>> {
         return this.recoverBatch<DeleteDocumentWith, never>('delete', docs, options);
     }
 
     private async recoverBatch<TInput extends GetDocumentWith | CreateDocumentWith, TResult>(
-        kind: 'get' | 'create' | 'delete', docs: TInput[], options: BatchGetOptions & BatchWriteOptions
+        kind: 'get' | 'create' | 'delete',
+        docs: TInput[],
+        options: BatchGetOptions & BatchWriteOptions
     ): Promise<BatchOutcome<TInput, TResult>> {
-        options = {...options, select: ValueUtils.clone(options.select)};
+        options = { ...options, select: ValueUtils.clone(options.select) };
         const concurrency = this.batchConcurrency(options);
         const original = ValueUtils.clone(docs);
         let prepared: CreateDocumentWith[] = ValueUtils.clone(docs);
         if (kind === 'create') {
             if (this._writeTimestamps) {
                 const now = Date.now();
-                prepared.forEach(document => { document['createdAt'] = now; });
+                prepared.forEach((document) => {
+                    document['createdAt'] = now;
+                });
             }
-            if (this.inputParser !== null) prepared = prepared.map(document => this.inputParser!(document));
+            if (this.inputParser !== null) prepared = prepared.map((document) => this.inputParser!(document));
         }
-        const encoded = prepared.map(document => QuerySerializer.serialiseMap(document));
+        const encoded = prepared.map((document) => QuerySerializer.serialiseMap(document));
         const states: Array<'completed' | 'unprocessed' | 'notSubmitted' | 'unknown'> = docs.map(() => 'notSubmitted');
-        const work: {index: number; indices: number[]}[] = [];
+        const work: { index: number; indices: number[] }[] = [];
         encoded.forEach((document, index) => {
-            const duplicate = kind === 'get' ? work.find(entry => ValueUtils.equals(encoded[entry.index], document)) : undefined;
+            const duplicate =
+                kind === 'get' ? work.find((entry) => ValueUtils.equals(encoded[entry.index], document)) : undefined;
             if (duplicate) duplicate.indices.push(index);
-            else work.push({index, indices: [index]});
+            else work.push({ index, indices: [index] });
         });
         const results: TResult[] = [];
         const errors: unknown[] = [];
         const entries = (requests: BatchRequestItems): unknown[] => {
             const table = requests[this.tableName];
-            return table === undefined ? [] : Array.isArray(table) ? table : table.Keys ?? [];
+            return table === undefined ? [] : Array.isArray(table) ? table : (table.Keys ?? []);
         };
-        const requestFor = (index: number): unknown => kind === 'get' ? encoded[index]
-            : kind === 'create' ? {PutRequest: {Item: encoded[index]}} : {DeleteRequest: {Key: encoded[index]}};
+        const requestFor = (index: number): unknown =>
+            kind === 'get'
+                ? encoded[index]
+                : kind === 'create'
+                  ? { PutRequest: { Item: encoded[index] } }
+                  : { DeleteRequest: { Key: encoded[index] } };
         try {
-            await runBatchChunks(work, kind === 'get' ? 100 : 25, concurrency, async chunk => {
-                const builder = new QueryBuilder(this.tableName, this.dynamoDB, this.documentParser, this.inputParser).logger(this._logger);
-                if (kind === 'get') builder.getBatchWorker(chunk.map(entry => encoded[entry.index]), options.consistentRead, options.select);
-                else if (kind === 'create') builder.createBatchWorker(chunk.map(entry => prepared[entry.index]));
-                else builder.deleteBatchWorker(chunk.map(entry => prepared[entry.index]));
-                builder.returnCapacity(options.returnConsumedCapacity);
-                if (kind !== 'get' && options.returnItemCollectionMetrics === 'SIZE') builder.returnItemCollectionMetrics();
-                builder.execution.bind(options);
-                const observer: BatchObserver = (submitted, unprocessed) => {
-                    const sent = entries(submitted);
-                    const remaining = unprocessed === undefined ? undefined : entries(unprocessed);
-                    for (const entry of chunk) {
-                        const request = requestFor(entry.index);
-                        if (!sent.some(candidate => ValueUtils.equals(candidate, request))) continue;
-                        const state = remaining === undefined ? 'unknown'
-                            : remaining.some(candidate => ValueUtils.equals(candidate, request)) ? 'unprocessed' : 'completed';
-                        entry.indices.forEach(index => { states[index] = state; });
+            await runBatchChunks(
+                work,
+                kind === 'get' ? 100 : 25,
+                concurrency,
+                async (chunk) => {
+                    const builder = new QueryBuilder(
+                        this.tableName,
+                        this.dynamoDB,
+                        this.documentParser,
+                        this.inputParser
+                    ).logger(this._logger);
+                    if (kind === 'get')
+                        builder.getBatchWorker(
+                            chunk.map((entry) => encoded[entry.index]),
+                            options.consistentRead,
+                            options.select
+                        );
+                    else if (kind === 'create') builder.createBatchWorker(chunk.map((entry) => prepared[entry.index]));
+                    else builder.deleteBatchWorker(chunk.map((entry) => prepared[entry.index]));
+                    builder.returnCapacity(options.returnConsumedCapacity);
+                    if (kind !== 'get' && options.returnItemCollectionMetrics === 'SIZE')
+                        builder.returnItemCollectionMetrics();
+                    builder.execution.bind(options);
+                    const observer: BatchObserver = (submitted, unprocessed) => {
+                        const sent = entries(submitted);
+                        const remaining = unprocessed === undefined ? undefined : entries(unprocessed);
+                        for (const entry of chunk) {
+                            const request = requestFor(entry.index);
+                            if (!sent.some((candidate) => ValueUtils.equals(candidate, request))) continue;
+                            const state =
+                                remaining === undefined
+                                    ? 'unknown'
+                                    : remaining.some((candidate) => ValueUtils.equals(candidate, request))
+                                      ? 'unprocessed'
+                                      : 'completed';
+                            entry.indices.forEach((index) => {
+                                states[index] = state;
+                            });
+                        }
+                    };
+                    const executor = builder.createExecutor(observer);
+                    try {
+                        await executor.execute();
+                    } catch (error) {
+                        errors.push(error);
+                        throw error;
+                    } finally {
+                        if (kind === 'get') results.push(...executor.batchResults<TResult>());
                     }
-                };
-                const executor = builder.createExecutor(observer);
-                try {
-                    await executor.execute();
-                } catch (error) {
-                    errors.push(error);
-                    throw error;
-                } finally {
-                    if (kind === 'get') results.push(...executor.batchResults<TResult>());
-                }
-            }, options.signal);
+                },
+                options.signal
+            );
         } catch (error) {
             if (!errors.includes(error)) errors.push(error);
         }
-        if (kind === 'create') prepared.forEach((document, index) => {
-            if (states[index] === 'completed') results.push(ValueUtils.clone(document) as TResult);
-        });
-        const outcome: BatchOutcome<TInput, TResult> = {completed: [], unprocessed: [], notSubmitted: [], unknown: [], results, errors, resumable: []};
+        if (kind === 'create')
+            prepared.forEach((document, index) => {
+                if (states[index] === 'completed') results.push(ValueUtils.clone(document) as TResult);
+            });
+        const outcome: BatchOutcome<TInput, TResult> = {
+            completed: [],
+            unprocessed: [],
+            notSubmitted: [],
+            unknown: [],
+            results,
+            errors,
+            resumable: []
+        };
         original.forEach((input, index) => {
             const state = states[index];
-            outcome[state].push({index, input: ValueUtils.clone(input)});
+            outcome[state].push({ index, input: ValueUtils.clone(input) });
             if (state === 'unprocessed' || state === 'notSubmitted') outcome.resumable.push(ValueUtils.clone(input));
         });
         return outcome;
@@ -466,7 +610,7 @@ export class QueryBuilder {
         }
         this.request.setIndex(index, kind);
 
-        return this.request.isScan() ? this.scanResult() as unknown as SubQuery : this.subQuery();
+        return this.request.isScan() ? (this.scanResult() as unknown as SubQuery) : this.subQuery();
     }
 
     /** Starts a Scan operation. */
@@ -605,21 +749,31 @@ export class QueryBuilder {
     }
 
     /** Starts a Query operation using equality conditions for the supplied partition-key document. */
-    public query(doc: QueryDocument, index?: DynamoDBIndexDefinition & {name: string}): Query {
+    public query(doc: QueryDocument, index?: DynamoDBIndexDefinition & { name: string }): Query {
         if (index !== undefined) {
-            const partition = keyComponents(index.partition), sort = keyComponents(index.sort);
+            const partition = keyComponents(index.partition),
+                sort = keyComponents(index.sort);
             const fields = [...partition, ...sort];
-            if (!['global', 'local'].includes(index.kind) || partition.length < 1 || partition.length > 4 || sort.length > 4
-                || (index.sort !== undefined && sort.length === 0) || fields.some(field => typeof field !== 'string' || !field)
-                || new Set(fields).size !== fields.length
-                || (index.kind === 'local' && (typeof index.partition !== 'string' || typeof index.sort !== 'string'))) {
+            if (
+                !['global', 'local'].includes(index.kind) ||
+                partition.length < 1 ||
+                partition.length > 4 ||
+                sort.length > 4 ||
+                (index.sort !== undefined && sort.length === 0) ||
+                fields.some((field) => typeof field !== 'string' || !field) ||
+                new Set(fields).size !== fields.length ||
+                (index.kind === 'local' && (typeof index.partition !== 'string' || typeof index.sort !== 'string'))
+            ) {
                 throw new Error('Invalid query index definition');
             }
-            if (Object.keys(doc).length !== partition.length || partition.some(field => !Object.prototype.hasOwnProperty.call(doc, field))) {
+            if (
+                Object.keys(doc).length !== partition.length ||
+                partition.some((field) => !Object.prototype.hasOwnProperty.call(doc, field))
+            ) {
                 throw new Error('Index query requires every partition component and no other fields');
             }
             this.indexSortFields = [...sort];
-            this.queryIndex = {name: index.name, kind: index.kind};
+            this.queryIndex = { name: index.name, kind: index.kind };
         }
         this.request.startQuery(this.tableName, false);
         if (index !== undefined) this.request.setIndex(index.name, index.kind);
@@ -665,7 +819,8 @@ export class QueryBuilder {
                 assertDynamoKeyValue(lower, true);
                 assertDynamoKeyValue(upper, true);
                 const order = compareDynamoValues(lower, upper);
-                if (order === null || order > 0) throw new Error('Sort-key range requires matching types and ordered bounds');
+                if (order === null || order > 0)
+                    throw new Error('Sort-key range requires matching types and ordered bounds');
                 this.registerSortKey(attribute, 'BETWEEN');
                 this.expressions.addKeyBetween(attribute, lower, upper);
                 return this.queryResult();
@@ -685,7 +840,9 @@ export class QueryBuilder {
     private registerSortKey(attribute: string, operator: string): void {
         if (this.indexSortFields !== null) {
             if (this.sortKeyAdded || attribute !== this.indexSortFields[this.indexSortPosition]) {
-                throw new Error('Index sort conditions require an ordered contiguous prefix with any range condition last');
+                throw new Error(
+                    'Index sort conditions require an ordered contiguous prefix with any range condition last'
+                );
             }
             this.indexSortPosition++;
             this.sortKeyAdded = operator !== '=';
@@ -744,7 +901,8 @@ export class QueryBuilder {
             return next();
         };
         return {
-            where: (attribute: AttributePath) => predicateComparison(attribute, predicate => this.expressions.addPredicate(predicate, filter), next),
+            where: (attribute: AttributePath) =>
+                predicateComparison(attribute, (predicate) => this.expressions.addPredicate(predicate, filter), next),
             whereAny: (callback: PredicateCallback) => group('OR', callback),
             whereAll: (callback: PredicateCallback) => group('AND', callback),
             whereNot: (callback: PredicateCallback) => group('NOT', callback)
@@ -859,13 +1017,12 @@ export class QueryBuilder {
     }
 
     private scanLimit(chunkSize: number, hardLimit: number | null = null): Scan {
-
         if (!Number.isInteger(chunkSize) || chunkSize < 1) {
-            throw new Error("Invalid Chunk Size");
+            throw new Error('Invalid Chunk Size');
         }
 
         if (hardLimit !== null && (!Number.isInteger(hardLimit) || hardLimit < 1)) {
-            throw new Error("Invalid Hard Limit");
+            throw new Error('Invalid Hard Limit');
         }
 
         this.request.setLimit(chunkSize);
@@ -875,13 +1032,12 @@ export class QueryBuilder {
     }
 
     private queryLimit(chunkSize: number, hardLimit: number | null = null): Query {
-
         if (!Number.isInteger(chunkSize) || chunkSize < 1) {
-            throw new Error("Invalid Chunk Size");
+            throw new Error('Invalid Chunk Size');
         }
 
         if (hardLimit !== null && (!Number.isInteger(hardLimit) || hardLimit < 1)) {
-            throw new Error("Invalid Hard Limit");
+            throw new Error('Invalid Hard Limit');
         }
 
         this.request.setLimit(chunkSize);
@@ -958,7 +1114,7 @@ export class QueryBuilder {
         }
         this._count = true;
         this.request.setCount();
-        return {toPromise: this.toPromise.bind(this), toResponse: this.toResponse.bind(this)};
+        return { toPromise: this.toPromise.bind(this), toResponse: this.toResponse.bind(this) };
     }
 
     private page<T>(options: PageOptions = {}): Promise<QueryPage<T>> {
@@ -997,12 +1153,14 @@ export class QueryBuilder {
             }
             this.request.setLimit(options.limit);
         }
-        if (options.cursor !== undefined && options.cursor !== null && (typeof options.cursor !== 'object' || Object.keys(options.cursor).length === 0)) {
+        if (
+            options.cursor !== undefined &&
+            options.cursor !== null &&
+            (typeof options.cursor !== 'object' || Object.keys(options.cursor).length === 0)
+        ) {
             throw new Error('Page cursor must contain at least one key');
         }
-        return options.cursor === undefined || options.cursor === null
-            ? null
-            : ValueUtils.clone(options.cursor);
+        return options.cursor === undefined || options.cursor === null ? null : ValueUtils.clone(options.cursor);
     }
 
     private assertExecutionAvailable(mode: 'all' | 'page' | 'iterator'): void {
@@ -1036,16 +1194,34 @@ export class QueryBuilder {
     public static defineTable = defineTypedTable;
 
     /** Creates an on-demand table from a full definition or a simple string-key shorthand. */
-    public static createTable(definition: DynamoDBTableDefinition, db: DynamoDBClient, options?: TableCreateOptions): Promise<TableDescription | null>;
-    public static createTable(name: string, key: string, db: DynamoDBClient, options?: TableCreateOptions): Promise<TableDescription | null>;
-    public static createTable(definitionOrName: DynamoDBTableDefinition | string, keyOrClient: string | DynamoDBClient, db?: DynamoDBClient | TableCreateOptions, options?: TableCreateOptions): Promise<TableDescription | null> {
+    public static createTable(
+        definition: DynamoDBTableDefinition,
+        db: DynamoDBClient,
+        options?: TableCreateOptions
+    ): Promise<TableDescription | null>;
+    public static createTable(
+        name: string,
+        key: string,
+        db: DynamoDBClient,
+        options?: TableCreateOptions
+    ): Promise<TableDescription | null>;
+    public static createTable(
+        definitionOrName: DynamoDBTableDefinition | string,
+        keyOrClient: string | DynamoDBClient,
+        db?: DynamoDBClient | TableCreateOptions,
+        options?: TableCreateOptions
+    ): Promise<TableDescription | null> {
         return typeof definitionOrName === 'string'
             ? QueryTableAdmin.createTable(definitionOrName, keyOrClient as string, db as DynamoDBClient, options)
             : QueryTableAdmin.createTable(definitionOrName, keyOrClient as DynamoDBClient, db as TableCreateOptions);
     }
 
     /** Deletes a table and returns the raw AWS table description when supplied. */
-    public static deleteTable(name: string, db: DynamoDBClient, options?: ExecutionOptions): Promise<TableDescription | null | undefined> {
+    public static deleteTable(
+        name: string,
+        db: DynamoDBClient,
+        options?: ExecutionOptions
+    ): Promise<TableDescription | null | undefined> {
         return QueryTableAdmin.deleteTable(name, db, options);
     }
 
@@ -1071,12 +1247,20 @@ export class QueryBuilder {
     public static describeTimeToLive = QueryTableAdmin.describeTimeToLive.bind(QueryTableAdmin);
 
     /** Returns the raw AWS DescribeTable response, including operational metadata such as status and ARN. */
-    public static describeTable(name: string, db: DynamoDBClient, options?: ExecutionOptions): Promise<TableDescription | null> {
+    public static describeTable(
+        name: string,
+        db: DynamoDBClient,
+        options?: ExecutionOptions
+    ): Promise<TableDescription | null> {
         return QueryTableAdmin.describeTable(name, db, options);
     }
 
     /** Returns a validated, portable key/index definition derived from the raw AWS table description. */
-    public static getTableDefinition(name: string, db: DynamoDBClient, options?: ExecutionOptions): Promise<DynamoDBTableDefinition | null> {
+    public static getTableDefinition(
+        name: string,
+        db: DynamoDBClient,
+        options?: ExecutionOptions
+    ): Promise<DynamoDBTableDefinition | null> {
         return QueryTableAdmin.getTableDefinition(name, db, options);
     }
 
@@ -1102,42 +1286,62 @@ export class QueryBuilder {
 
         switch (operation.kind) {
             case 'putItem':
-                return {Put: {
-                    TableName: operation.input.TableName,
-                    Item: operation.input.Item,
-                    ConditionExpression: operation.input.ConditionExpression,
-                    ExpressionAttributeNames: operation.input.ExpressionAttributeNames,
-                    ExpressionAttributeValues: operation.input.ExpressionAttributeValues,
-                    ReturnValuesOnConditionCheckFailure: returnValues === undefined ? operation.input.ReturnValuesOnConditionCheckFailure : returnValues
-                }};
+                return {
+                    Put: {
+                        TableName: operation.input.TableName,
+                        Item: operation.input.Item,
+                        ConditionExpression: operation.input.ConditionExpression,
+                        ExpressionAttributeNames: operation.input.ExpressionAttributeNames,
+                        ExpressionAttributeValues: operation.input.ExpressionAttributeValues,
+                        ReturnValuesOnConditionCheckFailure:
+                            returnValues === undefined
+                                ? operation.input.ReturnValuesOnConditionCheckFailure
+                                : returnValues
+                    }
+                };
             case 'deleteItem':
-                return {Delete: {
-                    TableName: operation.input.TableName,
-                    Key: operation.input.Key,
-                    ConditionExpression: operation.input.ConditionExpression,
-                    ExpressionAttributeNames: operation.input.ExpressionAttributeNames,
-                    ExpressionAttributeValues: operation.input.ExpressionAttributeValues,
-                    ReturnValuesOnConditionCheckFailure: returnValues === undefined ? operation.input.ReturnValuesOnConditionCheckFailure : returnValues
-                }};
+                return {
+                    Delete: {
+                        TableName: operation.input.TableName,
+                        Key: operation.input.Key,
+                        ConditionExpression: operation.input.ConditionExpression,
+                        ExpressionAttributeNames: operation.input.ExpressionAttributeNames,
+                        ExpressionAttributeValues: operation.input.ExpressionAttributeValues,
+                        ReturnValuesOnConditionCheckFailure:
+                            returnValues === undefined
+                                ? operation.input.ReturnValuesOnConditionCheckFailure
+                                : returnValues
+                    }
+                };
             case 'updateItem':
-                return {Update: {
-                    TableName: operation.input.TableName,
-                    Key: operation.input.Key,
-                    UpdateExpression: operation.input.UpdateExpression,
-                    ConditionExpression: operation.input.ConditionExpression,
-                    ExpressionAttributeNames: operation.input.ExpressionAttributeNames,
-                    ExpressionAttributeValues: operation.input.ExpressionAttributeValues,
-                    ReturnValuesOnConditionCheckFailure: returnValues === undefined ? operation.input.ReturnValuesOnConditionCheckFailure : returnValues
-                }};
+                return {
+                    Update: {
+                        TableName: operation.input.TableName,
+                        Key: operation.input.Key,
+                        UpdateExpression: operation.input.UpdateExpression,
+                        ConditionExpression: operation.input.ConditionExpression,
+                        ExpressionAttributeNames: operation.input.ExpressionAttributeNames,
+                        ExpressionAttributeValues: operation.input.ExpressionAttributeValues,
+                        ReturnValuesOnConditionCheckFailure:
+                            returnValues === undefined
+                                ? operation.input.ReturnValuesOnConditionCheckFailure
+                                : returnValues
+                    }
+                };
             case 'conditionCheck':
                 if (!operation.input.ConditionExpression) {
                     throw new Error('conditionCheck requires at least one condition');
                 }
-                return {ConditionCheck: {
-                    ...operation.input,
-                    ConditionExpression: operation.input.ConditionExpression,
-                    ReturnValuesOnConditionCheckFailure: returnValues === undefined ? operation.input.ReturnValuesOnConditionCheckFailure : returnValues
-                }};
+                return {
+                    ConditionCheck: {
+                        ...operation.input,
+                        ConditionExpression: operation.input.ConditionExpression,
+                        ReturnValuesOnConditionCheckFailure:
+                            returnValues === undefined
+                                ? operation.input.ReturnValuesOnConditionCheckFailure
+                                : returnValues
+                    }
+                };
             default:
                 throw new Error('Transactions support only create, update, delete, and conditionCheck operations');
         }
@@ -1166,19 +1370,20 @@ export class QueryBuilder {
         this.assertExecutionAvailable('all');
         this.request.applyExpressions(this.expressions);
         const operation = this.request.getOperation();
-        this._response = operation === null
-            ? Promise.resolve({value: undefined, consumedCapacity: [], itemCollectionMetrics: []})
-            : new QueryExecutor(
-                this.dynamoDB,
-                operation,
-                this._docs,
-                this._hardLimit,
-                this._logger,
-                this._rid,
-                this.documentParser,
-                this._projection,
-            this.execution.signal
-            ).executeResponse<T>() as Promise<DynamoResponse<any>>;
+        this._response =
+            operation === null
+                ? Promise.resolve({ value: undefined, consumedCapacity: [], itemCollectionMetrics: [] })
+                : (new QueryExecutor(
+                      this.dynamoDB,
+                      operation,
+                      this._docs,
+                      this._hardLimit,
+                      this._logger,
+                      this._rid,
+                      this.documentParser,
+                      this._projection,
+                      this.execution.signal
+                  ).executeResponse<T>() as Promise<DynamoResponse<any>>);
         return this._response as Promise<DynamoResponse<T>>;
     }
 
@@ -1186,13 +1391,14 @@ export class QueryBuilder {
         this.execution.bind(options);
         if (this._result === null) {
             this._result = this.toPromise<T>().then(
-                (value): ConditionalWriteResult<T, TPrevious> => ({applied: true, value}),
+                (value): ConditionalWriteResult<T, TPrevious> => ({ applied: true, value }),
                 (error): ConditionalWriteResult<T, TPrevious> => {
                     if (!(error instanceof ConditionalCheckFailedException)) {
                         throw error;
                     }
-                    const previous = error.Item === undefined ? null : QuerySerializer.parseItem(error.Item) as TPrevious;
-                    return {applied: false, previous};
+                    const previous =
+                        error.Item === undefined ? null : (QuerySerializer.parseItem(error.Item) as TPrevious);
+                    return { applied: false, previous };
                 }
             );
         }

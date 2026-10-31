@@ -1,12 +1,12 @@
-import {compileSetOperand} from './update-expression';
-import type {SetOperand} from './update-expression';
-import {QuerySerializer} from "./query-serializer";
-import {UpdateExpressionType} from "./types";
-import type {GenericDocument, GetSelector} from "./types";
-import {isAttributeReference, path, pathSegments, pathKey, pathsOverlap} from './document-path';
-import type {AttributePath} from './document-path';
-import {validatePredicate} from './predicate';
-import type {Predicate} from './predicate';
+import { compileSetOperand } from './update-expression';
+import type { SetOperand } from './update-expression';
+import { QuerySerializer } from './query-serializer';
+import { UpdateExpressionType } from './types';
+import type { GenericDocument, GetSelector } from './types';
+import { isAttributeReference, path, pathSegments, pathKey, pathsOverlap } from './document-path';
+import type { AttributePath } from './document-path';
+import { validatePredicate } from './predicate';
+import type { Predicate } from './predicate';
 
 /** Expression fields populated on an AWS DynamoDB request input. */
 export interface ExpressionTarget {
@@ -28,7 +28,7 @@ export interface ExpressionTarget {
 
 /** Accumulates DynamoDB expressions and placeholder values for one operation. */
 export class ExpressionBuilder {
-    private updates: {type: UpdateExpressionType, name: AttributePath, expression?: string}[] = [];
+    private updates: { type: UpdateExpressionType; name: AttributePath; expression?: string }[] = [];
     private attributeId = 0;
     private updateValueId = 0;
     private keyConditionExpression: string | undefined;
@@ -48,36 +48,51 @@ export class ExpressionBuilder {
 
     private compilePredicate(predicate: Predicate): string {
         if (predicate.kind === 'group') {
-            const children = predicate.children.map(child => this.compilePredicate(child));
-            return predicate.operator === 'NOT' ? `NOT (${children.join(' AND ')})` : `(${children.join(` ${predicate.operator} `)})`;
+            const children = predicate.children.map((child) => this.compilePredicate(child));
+            return predicate.operator === 'NOT'
+                ? `NOT (${children.join(' AND ')})`
+                : `(${children.join(` ${predicate.operator} `)})`;
         }
         const alias = this.addPath(predicate.attribute);
         const operand = predicate.size ? `size(${alias})` : alias;
-        const values = predicate.values.map(value => isAttributeReference(value)
-            ? this.addPath(path(...value.segments)) : `:${this.addUniqueValue(value)}`);
-        const operator = predicate.operator === 'attribute_exists' && predicate.negated ? 'attribute_not_exists' : predicate.operator;
-        const expression = predicate.kind === 'function'
-            ? `${operator}${operator === 'contains' ? ' ' : ''}(${[operand, ...values].join(', ')})`
-            : predicate.kind === 'in' ? `${operand} IN (${values.join(', ')})`
-                : predicate.kind === 'between' ? `${operand} BETWEEN ${values[0]} AND ${values[1]}`
+        const values = predicate.values.map((value) =>
+            isAttributeReference(value) ? this.addPath(path(...value.segments)) : `:${this.addUniqueValue(value)}`
+        );
+        const operator =
+            predicate.operator === 'attribute_exists' && predicate.negated
+                ? 'attribute_not_exists'
+                : predicate.operator;
+        const expression =
+            predicate.kind === 'function'
+                ? `${operator}${operator === 'contains' ? ' ' : ''}(${[operand, ...values].join(', ')})`
+                : predicate.kind === 'in'
+                  ? `${operand} IN (${values.join(', ')})`
+                  : predicate.kind === 'between'
+                    ? `${operand} BETWEEN ${values[0]} AND ${values[1]}`
                     : `${operand} ${predicate.operator} ${values[0]}`;
         return predicate.negated && predicate.operator !== 'attribute_exists' ? `NOT (${expression})` : expression;
     }
 
     hasUpdate(name: AttributePath): boolean {
-        return this.updates.some(update => pathKey(update.name) === pathKey(name));
+        return this.updates.some((update) => pathKey(update.name) === pathKey(name));
     }
 
     /** Adds an update action for an attribute. */
     addUpdate(type: UpdateExpressionType, name: AttributePath): void {
         const segments = pathSegments(name);
-        if ((type === UpdateExpressionType.ADD || type === UpdateExpressionType.DELETE) && segments.length !== 1) throw new Error('ADD and DELETE support top-level attributes only');
-        if (this.updates.some(update => pathKey(update.name) !== pathKey(name) && pathsOverlap(update.name, name))) throw new Error('Overlapping update paths');
-        this.updates.push({type, name});
+        if ((type === UpdateExpressionType.ADD || type === UpdateExpressionType.DELETE) && segments.length !== 1)
+            throw new Error('ADD and DELETE support top-level attributes only');
+        if (this.updates.some((update) => pathKey(update.name) !== pathKey(name) && pathsOverlap(update.name, name)))
+            throw new Error('Overlapping update paths');
+        this.updates.push({ type, name });
     }
 
     addAssignment(name: AttributePath, operand: SetOperand): void {
-        const compiled = compileSetOperand(operand, attribute => this.addPath(attribute), value => `:${this.addUniqueValue(value)}`);
+        const compiled = compileSetOperand(
+            operand,
+            (attribute) => this.addPath(attribute),
+            (value) => `:${this.addUniqueValue(value)}`
+        );
         this.addUpdate(UpdateExpressionType.SET, name);
         this.updates[this.updates.length - 1].expression = compiled;
     }
@@ -87,7 +102,10 @@ export class ExpressionBuilder {
         let valueKey = this.updateValueKeys.get(pathKey(attribute));
 
         if (valueKey === undefined) {
-            valueKey = typeof attribute === 'string' && /^[A-Za-z0-9_]{1,254}$/.test(attribute) ? attribute : `update${this.updateValueId++}`;
+            valueKey =
+                typeof attribute === 'string' && /^[A-Za-z0-9_]{1,254}$/.test(attribute)
+                    ? attribute
+                    : `update${this.updateValueId++}`;
             while (this.attributeValues[`:${valueKey}`] !== undefined) {
                 valueKey = `update${this.updateValueId++}`;
             }
@@ -119,22 +137,29 @@ export class ExpressionBuilder {
 
     /** Registers every map component of an explicit document path. */
     addPath(attribute: AttributePath): string {
-        return pathSegments(attribute).map((segment, index) => typeof segment === 'number'
-            ? `[${segment}]`
-            : `${index === 0 ? '' : '.'}${this.addName(segment)}`).join('');
+        return pathSegments(attribute)
+            .map((segment, index) =>
+                typeof segment === 'number' ? `[${segment}]` : `${index === 0 ? '' : '.'}${this.addName(segment)}`
+            )
+            .join('');
     }
 
     /** Adds an equality-style key condition. */
     addKeyCondition(name: string, operator: string, value: unknown): void {
         this.addValue(name, value);
-        this.keyConditionExpression = this.append(this.keyConditionExpression,
-            `${this.addName(name)} ${operator} :${this.updateValueKeys.get(pathKey(name))}`);
+        this.keyConditionExpression = this.append(
+            this.keyConditionExpression,
+            `${this.addName(name)} ${operator} :${this.updateValueKeys.get(pathKey(name))}`
+        );
     }
 
     /** Adds a comparison against a query sort key. */
     addKeyComparison(name: string, operator: string, value: unknown): void {
         const valueKey = this.addUniqueValue(value);
-        this.keyConditionExpression = this.append(this.keyConditionExpression, `${this.addName(name)} ${operator} :${valueKey}`);
+        this.keyConditionExpression = this.append(
+            this.keyConditionExpression,
+            `${this.addName(name)} ${operator} :${valueKey}`
+        );
     }
 
     /** Adds an inclusive sort-key range condition. */
@@ -150,7 +175,10 @@ export class ExpressionBuilder {
     /** Adds a string or binary sort-key prefix condition. */
     addKeyBeginsWith(name: string, value: unknown): void {
         const valueKey = this.addUniqueValue(value);
-        this.keyConditionExpression = this.append(this.keyConditionExpression, `begins_with(${this.addName(name)}, :${valueKey})`);
+        this.keyConditionExpression = this.append(
+            this.keyConditionExpression,
+            `begins_with(${this.addName(name)}, :${valueKey})`
+        );
     }
 
     /** Adds an attribute-existence condition. */
@@ -162,9 +190,8 @@ export class ExpressionBuilder {
     addComparison(name: string, operator: string, value: unknown, negated: boolean, filter: boolean): void {
         const valueKey = this.addUniqueValue(value);
         const alias = this.addName(name);
-        const comparison = operator === 'contains'
-            ? `contains (${alias}, :${valueKey})`
-            : `${alias} ${operator} :${valueKey}`;
+        const comparison =
+            operator === 'contains' ? `contains (${alias}, :${valueKey})` : `${alias} ${operator} :${valueKey}`;
 
         this.addExpression((negated ? 'NOT (' : '') + comparison + (negated ? ')' : ''), filter);
     }
@@ -188,12 +215,23 @@ export class ExpressionBuilder {
         this.assignOrDelete(target, 'KeyConditionExpression', this.keyConditionExpression);
         this.assignOrDelete(target, 'ConditionExpression', this.conditionExpression);
         this.assignOrDelete(target, 'FilterExpression', this.filterExpression);
-        const expressions = [target.UpdateExpression, target.KeyConditionExpression, target.ConditionExpression,
-            target.FilterExpression, target.ProjectionExpression].filter(Boolean).join(' ');
+        const expressions = [
+            target.UpdateExpression,
+            target.KeyConditionExpression,
+            target.ConditionExpression,
+            target.FilterExpression,
+            target.ProjectionExpression
+        ]
+            .filter(Boolean)
+            .join(' ');
         const valueAliases = new Set<string>(expressions.match(/:[A-Za-z0-9_]+/g) || []);
         const nameAliases = new Set<string>(expressions.match(/#[A-Za-z0-9_]+/g) || []);
-        const values = Object.fromEntries(Object.entries(this.attributeValues).filter(([alias]) => valueAliases.has(alias)));
-        const names = Object.fromEntries(Object.entries(this.attributeNames).filter(([alias]) => nameAliases.has(alias)));
+        const values = Object.fromEntries(
+            Object.entries(this.attributeValues).filter(([alias]) => valueAliases.has(alias))
+        );
+        const names = Object.fromEntries(
+            Object.entries(this.attributeNames).filter(([alias]) => nameAliases.has(alias))
+        );
         this.assignOrDelete(target, 'ExpressionAttributeValues', Object.keys(values).length ? values : undefined);
         this.assignOrDelete(target, 'ExpressionAttributeNames', Object.keys(names).length ? names : undefined);
     }
@@ -231,7 +269,7 @@ export class ExpressionBuilder {
         }
 
         // The last action per attribute wins; values from losing value-bearing actions are dropped.
-        const winners = new Map<string, {type: UpdateExpressionType; name: AttributePath; expression?: string}>();
+        const winners = new Map<string, { type: UpdateExpressionType; name: AttributePath; expression?: string }>();
 
         for (const update of this.updates) {
             winners.set(pathKey(update.name), update);
@@ -239,7 +277,7 @@ export class ExpressionBuilder {
 
         const groups = new Map<UpdateExpressionType, string[]>();
 
-        winners.forEach(({type, name, expression}) => {
+        winners.forEach(({ type, name, expression }) => {
             const valueKey = this.updateValueKeys.get(pathKey(name));
 
             if (type === UpdateExpressionType.REMOVE) {
@@ -247,11 +285,12 @@ export class ExpressionBuilder {
             }
 
             const alias = this.addPath(name);
-            const clause = type === UpdateExpressionType.SET
-                ? `${alias} = ${expression ?? `:${valueKey}`}`
-                : type === UpdateExpressionType.REMOVE
-                    ? alias
-                    : `${alias} :${valueKey}`;
+            const clause =
+                type === UpdateExpressionType.SET
+                    ? `${alias} = ${expression ?? `:${valueKey}`}`
+                    : type === UpdateExpressionType.REMOVE
+                      ? alias
+                      : `${alias} :${valueKey}`;
             const group = groups.get(type);
 
             if (group) {
@@ -266,7 +305,11 @@ export class ExpressionBuilder {
             .join(' ');
     }
 
-    private assignOrDelete<TKey extends keyof ExpressionTarget>(target: ExpressionTarget, key: TKey, value: ExpressionTarget[TKey]): void {
+    private assignOrDelete<TKey extends keyof ExpressionTarget>(
+        target: ExpressionTarget,
+        key: TKey,
+        value: ExpressionTarget[TKey]
+    ): void {
         if (value === undefined) {
             delete target[key];
         } else {

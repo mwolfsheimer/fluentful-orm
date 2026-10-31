@@ -1,75 +1,93 @@
 import assert from 'node:assert/strict';
-import {transactGet} from '../src/transaction-read-builder';
-import {describe, test} from 'node:test';
-import {QueryBuilder} from '../src/query-builder';
-import {createFakeDynamoDB} from './fake-dynamodb';
+import { transactGet } from '../src/transaction-read-builder';
+import { describe, test } from 'node:test';
+import { QueryBuilder } from '../src/query-builder';
+import { createFakeDynamoDB } from './fake-dynamodb';
 
 test('preserves transactional-read failures and freezes execution options', async () => {
     const reason = new Error('cancel read');
     const controller = new AbortController();
     controller.abort(reason);
-    const fake = createFakeDynamoDB(() => ({Responses: [{}]}));
-    const aborted = transactGet(fake.db).add('test', {id: 'one'});
-    const promise = aborted.toPromise({signal: controller.signal});
-    await assert.rejects(promise, error => error === reason);
+    const fake = createFakeDynamoDB(() => ({ Responses: [{}] }));
+    const aborted = transactGet(fake.db).add('test', { id: 'one' });
+    const promise = aborted.toPromise({ signal: controller.signal });
+    await assert.rejects(promise, (error) => error === reason);
     assert.equal(aborted.toPromise(), promise);
     assert.equal(fake.inputs.length, 0);
     assert.throws(() => aborted.returnCapacity(), /executed/);
     assert.throws(() => aborted.logger(() => {}), /executed/);
-    assert.throws(() => transactGet(fake.db).add('test', {id: true} as any), /key/i);
-    const malformed = createFakeDynamoDB(() => ({Responses: []}));
-    const read = transactGet(malformed.db).add('test', {id: 'one'});
+    assert.throws(() => transactGet(fake.db).add('test', { id: true } as any), /key/i);
+    const malformed = createFakeDynamoDB(() => ({ Responses: [] }));
+    const read = transactGet(malformed.db).add('test', { id: 'one' });
     await assert.rejects(read.toPromise(), /Malformed/);
     await assert.rejects(read.toResponse(), /Malformed/);
     assert.equal(malformed.inputs.length, 1);
     const failure = new Error('service failure');
-    const failing = createFakeDynamoDB(() => { throw failure; });
-    const request = transactGet(failing.db).add('test', {id: 'one'});
-    await assert.rejects(request.toPromise(), error => error === failure);
-    await assert.rejects(request.toResponse(), error => error === failure);
+    const failing = createFakeDynamoDB(() => {
+        throw failure;
+    });
+    const request = transactGet(failing.db).add('test', { id: 'one' });
+    await assert.rejects(request.toPromise(), (error) => error === failure);
+    await assert.rejects(request.toResponse(), (error) => error === failure);
     assert.equal(failing.inputs.length, 1);
 });
 describe('query - QueryBuilder transactions', () => {
     test('reads ordered transaction results with projections and cached execution', async () => {
-        const fake = createFakeDynamoDB(() => ({Responses: [{Item: {value: {N: '2'}}}, {}, {Item: {}}]}));
+        const fake = createFakeDynamoDB(() => ({ Responses: [{ Item: { value: { N: '2' } } }, {}, { Item: {} }] }));
         const transaction = QueryBuilder.transactGet(fake.db)
-            .add('test', {id: 'one'}, ['value']).add('test', {id: 'missing'}).add('test', {id: 'empty'}, ['value']);
+            .add('test', { id: 'one' }, ['value'])
+            .add('test', { id: 'missing' })
+            .add('test', { id: 'empty' }, ['value']);
         const controller = new AbortController();
-        const promise = transaction.toPromise({signal: controller.signal});
+        const promise = transaction.toPromise({ signal: controller.signal });
         assert.equal(transaction.toPromise(), promise);
-        assert.deepEqual(await promise, [{value: 2}, null, {}]);
+        assert.deepEqual(await promise, [{ value: 2 }, null, {}]);
         assert.equal(fake.options[0].abortSignal, controller.signal);
         assert.equal(fake.inputs[0].TransactItems.length, 3);
         assert.equal(fake.inputs[0].TransactItems[0].Get.ProjectionExpression, '#value');
-        assert.throws(() => transaction.add('test', {id: 'late'}), /after a transaction/);
+        assert.throws(() => transaction.add('test', { id: 'late' }), /after a transaction/);
         assert.throws(() => QueryBuilder.transactGet(fake.db).toPromise(), /at least one/);
         const full = QueryBuilder.transactGet(fake.db);
-        for (let index = 0; index < 100; index++) full.add('test', {id: String(index)});
-        assert.throws(() => full.add('test', {id: 'overflow'}), /at most 100/);
+        for (let index = 0; index < 100; index++) full.add('test', { id: String(index) });
+        assert.throws(() => full.add('test', { id: 'overflow' }), /at most 100/);
     });
 
     test('snapshots retained builders when adding transaction items', async () => {
         const fake = createFakeDynamoDB();
         const builder = new QueryBuilder('test', fake.db);
-        const update = builder.update({id: 'one'}).set('value').eq(1);
+        const update = builder.update({ id: 'one' }).set('value').eq(1);
         const transaction = QueryBuilder.transactWrite(fake.db).addBuilder(builder);
         update.set('value').eq(2);
         builder.toTransactionItem();
         await transaction.toPromise();
-        assert.deepEqual(fake.inputs[0].TransactItems[0].Update.ExpressionAttributeValues, {':value': {N: '1'}});
+        assert.deepEqual(fake.inputs[0].TransactItems[0].Update.ExpressionAttributeValues, { ':value': { N: '1' } });
     });
 
     test('inherits builder failure return values and lets transaction options override them', async () => {
         const fake = createFakeDynamoDB();
         await QueryBuilder.transactWrite(fake.db)
-            .add('test', (query) => query.create({id: 'put'}).where('id').not().exists()
-                .onConditionFailure().returningAllOld())
-            .add('test', (query) => query.update({id: 'update'}).add('count').eq(1).where('count').lt(10)
-                .onConditionFailure().returningAllOld(), {returnValuesOnConditionCheckFailure: 'NONE'})
-            .add('test', (query) => query.delete({id: 'delete'}).where('id').exists()
-                .onConditionFailure().returningAllOld())
-            .add('test', (query) => query.conditionCheck({id: 'check'}).where('id').exists()
-                .onConditionFailure().returningAllOld())
+            .add('test', (query) =>
+                query.create({ id: 'put' }).where('id').not().exists().onConditionFailure().returningAllOld()
+            )
+            .add(
+                'test',
+                (query) =>
+                    query
+                        .update({ id: 'update' })
+                        .add('count')
+                        .eq(1)
+                        .where('count')
+                        .lt(10)
+                        .onConditionFailure()
+                        .returningAllOld(),
+                { returnValuesOnConditionCheckFailure: 'NONE' }
+            )
+            .add('test', (query) =>
+                query.delete({ id: 'delete' }).where('id').exists().onConditionFailure().returningAllOld()
+            )
+            .add('test', (query) =>
+                query.conditionCheck({ id: 'check' }).where('id').exists().onConditionFailure().returningAllOld()
+            )
             .toPromise();
         const items = fake.inputs[0].TransactItems;
         assert.equal(items[0].Put.ReturnValuesOnConditionCheckFailure, 'ALL_OLD');
@@ -82,28 +100,32 @@ describe('query - QueryBuilder transactions', () => {
         const fake = createFakeDynamoDB();
 
         await new QueryBuilder('accounts', fake.db)
-            .conditionCheck({id: 'account-1'})
-            .where('credits').gte(1)
-            .where('state').eq('active')
+            .conditionCheck({ id: 'account-1' })
+            .where('credits')
+            .gte(1)
+            .where('state')
+            .eq('active')
             .toPromise();
 
         assert.deepEqual(fake.inputs[0], {
             ReturnConsumedCapacity: 'INDEXES',
-            TransactItems: [{
-                ConditionCheck: {
-                    TableName: 'accounts',
-                    Key: {id: {S: 'account-1'}},
-                    ConditionExpression: '#credits >= :condition0 AND #state = :condition1',
-                    ExpressionAttributeNames: {
-                        '#credits': 'credits',
-                        '#state': 'state'
-                    },
-                    ExpressionAttributeValues: {
-                        ':condition0': {N: '1'},
-                        ':condition1': {S: 'active'}
+            TransactItems: [
+                {
+                    ConditionCheck: {
+                        TableName: 'accounts',
+                        Key: { id: { S: 'account-1' } },
+                        ConditionExpression: '#credits >= :condition0 AND #state = :condition1',
+                        ExpressionAttributeNames: {
+                            '#credits': 'credits',
+                            '#state': 'state'
+                        },
+                        ExpressionAttributeValues: {
+                            ':condition0': { N: '1' },
+                            ':condition1': { S: 'active' }
+                        }
                     }
                 }
-            }]
+            ]
         });
     });
 
@@ -112,20 +134,14 @@ describe('query - QueryBuilder transactions', () => {
 
         await QueryBuilder.transactWrite(fake.db)
             .clientRequestToken('transaction-request-1')
-            .add('accounts', (query) => query
-                .conditionCheck({id: 'transaction-guard'})
-                .where('credits').gte(1), {returnValuesOnConditionCheckFailure: 'ALL_OLD'})
-            .add('cards', (query) => query
-                .timestamps()
-                .create({id: 'card-1', recipient: 'Alex'})
-                .where('id').not().exists())
-            .add('accounts', (query) => query
-                .update({id: 'account-1'})
-                .add('credits').eq(-1)
-                .where('credits').gte(1))
-            .add('drafts', (query) => query
-                .delete({id: 'draft-1'})
-                .where('id').exists())
+            .add('accounts', (query) => query.conditionCheck({ id: 'transaction-guard' }).where('credits').gte(1), {
+                returnValuesOnConditionCheckFailure: 'ALL_OLD'
+            })
+            .add('cards', (query) =>
+                query.timestamps().create({ id: 'card-1', recipient: 'Alex' }).where('id').not().exists()
+            )
+            .add('accounts', (query) => query.update({ id: 'account-1' }).add('credits').eq(-1).where('credits').gte(1))
+            .add('drafts', (query) => query.delete({ id: 'draft-1' }).where('id').exists())
             .toPromise();
 
         const input = fake.inputs[0];
@@ -144,8 +160,9 @@ describe('query - QueryBuilder transactions', () => {
 
     test('submits a transaction only once', async () => {
         const fake = createFakeDynamoDB();
-        const transaction = QueryBuilder.transactWrite(fake.db)
-            .add('test', (query) => query.create({id: 'single-send'}));
+        const transaction = QueryBuilder.transactWrite(fake.db).add('test', (query) =>
+            query.create({ id: 'single-send' })
+        );
 
         const first = transaction.toPromise();
         const second = transaction.toPromise();
@@ -158,7 +175,7 @@ describe('query - QueryBuilder transactions', () => {
     test('accumulates transaction items in a loop before executing once', async () => {
         const fake = createFakeDynamoDB();
         const transaction = QueryBuilder.transactWrite(fake.db);
-        const documents = Array.from({length: 10}, (_, index) => ({
+        const documents = Array.from({ length: 10 }, (_, index) => ({
             id: `loop-item-${index}`,
             value: index
         }));
@@ -187,8 +204,9 @@ describe('query - QueryBuilder transactions', () => {
         const fake = createFakeDynamoDB(() => {
             throw serviceError;
         });
-        const transaction = QueryBuilder.transactWrite(fake.db)
-            .add('test', (query) => query.create({id: 'rejected'}));
+        const transaction = QueryBuilder.transactWrite(fake.db).add('test', (query) =>
+            query.create({ id: 'rejected' })
+        );
 
         const first = transaction.toPromise();
         const second = transaction.toPromise();
@@ -206,10 +224,7 @@ describe('query - QueryBuilder transactions', () => {
         });
 
         await assert.rejects(
-            new QueryBuilder('test', fake.db)
-                .conditionCheck({id: 'missing'})
-                .where('id').exists()
-                .toPromise(),
+            new QueryBuilder('test', fake.db).conditionCheck({ id: 'missing' }).where('id').exists().toPromise(),
             (error) => error === serviceError
         );
         assert.equal(fake.inputs.length, 1);
@@ -219,25 +234,26 @@ describe('query - QueryBuilder transactions', () => {
         const fake = createFakeDynamoDB();
         const transaction = QueryBuilder.transactWrite(fake.db);
 
-        assert.throws(() => transaction.add('test', () => {
-            throw new Error('configuration failed');
-        }), /configuration failed/);
+        assert.throws(
+            () =>
+                transaction.add('test', () => {
+                    throw new Error('configuration failed');
+                }),
+            /configuration failed/
+        );
 
-        await transaction
-            .add('test', (query) => query.create({id: 'configured'}))
-            .toPromise();
+        await transaction.add('test', (query) => query.create({ id: 'configured' })).toPromise();
         assert.equal(fake.inputs[0].TransactItems.length, 1);
         assert.equal(fake.inputs[0].TransactItems[0].Put.Item.id.S, 'configured');
     });
 
     test('rejects additions after transaction execution starts', async () => {
         const fake = createFakeDynamoDB();
-        const transaction = QueryBuilder.transactWrite(fake.db)
-            .add('test', (query) => query.create({id: 'started'}));
+        const transaction = QueryBuilder.transactWrite(fake.db).add('test', (query) => query.create({ id: 'started' }));
 
         const result = transaction.toPromise();
         assert.throws(
-            () => transaction.add('test', (query) => query.create({id: 'too-late'})),
+            () => transaction.add('test', (query) => query.create({ id: 'too-late' })),
             /after a transaction has executed/
         );
         await result;
@@ -247,29 +263,26 @@ describe('query - QueryBuilder transactions', () => {
         const fake = createFakeDynamoDB();
 
         assert.throws(() => QueryBuilder.transactWrite(fake.db).toPromise(), /at least one operation/);
+        assert.throws(() => QueryBuilder.transactWrite(fake.db).add('test', () => undefined), /must be configured/);
         assert.throws(
-            () => QueryBuilder.transactWrite(fake.db).add('test', () => undefined),
-            /must be configured/
-        );
-        assert.throws(
-            () => QueryBuilder.transactWrite(fake.db).add('test', (query) => query.get({id: 'read'})),
+            () => QueryBuilder.transactWrite(fake.db).add('test', (query) => query.get({ id: 'read' })),
             /support only create, update, delete, and conditionCheck/
         );
         assert.throws(
-            () => QueryBuilder.transactWrite(fake.db).add('test', (query) => query.conditionCheck({id: 'unchecked'})),
+            () => QueryBuilder.transactWrite(fake.db).add('test', (query) => query.conditionCheck({ id: 'unchecked' })),
             /requires at least one condition/
         );
         await assert.rejects(
-            new QueryBuilder('test', fake.db).conditionCheck({id: 'unchecked'}).toPromise(),
+            new QueryBuilder('test', fake.db).conditionCheck({ id: 'unchecked' }).toPromise(),
             /requires at least one condition/
         );
 
         const transaction = QueryBuilder.transactWrite(fake.db);
         for (let index = 0; index < 100; index++) {
-            transaction.add('test', (query) => query.create({id: `item-${index}`}));
+            transaction.add('test', (query) => query.create({ id: `item-${index}` }));
         }
         assert.throws(
-            () => transaction.add('test', (query) => query.create({id: 'item-101'})),
+            () => transaction.add('test', (query) => query.create({ id: 'item-101' })),
             /at most 100 operations/
         );
     });

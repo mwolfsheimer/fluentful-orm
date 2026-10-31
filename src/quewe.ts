@@ -1,4 +1,4 @@
-import type {Stream} from "./types";
+import type { Stream } from './types';
 
 /** Small serial execution queue used to drain asynchronous work one item at a time. */
 export class Quewe {

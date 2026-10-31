@@ -10,22 +10,19 @@ The first query uses the table key; the second uses an index key. Neither needs 
 
 <!-- example: examples/docs/queries.ts -->
 ```ts
-import {withTasks} from './task-setup';
+import { withTasks } from './task-setup';
 
-withTasks(async ({tasks}) => {
-    const projectTasks = await tasks.query({projectId: 'project-1'})
-        .sortKey().beginsWith('task-')
-        .toPromise();
-    const todoTasks = await tasks.index('status-index')
-        .query({status: 'todo'})
-        .sortKey().gte(5)
-        .toPromise();
+withTasks(async ({ tasks }) => {
+    const projectTasks = await tasks.query({ projectId: 'project-1' }).sortKey().beginsWith('task-').toPromise();
+    const todoTasks = await tasks.index('status-index').query({ status: 'todo' }).sortKey().gte(5).toPromise();
 
-    console.log(JSON.stringify({
-        projectTitles: projectTasks.map(task => task.title),
-        todoTitles: todoTasks.map(task => task.title)
-    }));
-}).catch(error => {
+    console.log(
+        JSON.stringify({
+            projectTitles: projectTasks.map((task) => task.title),
+            todoTitles: todoTasks.map((task) => task.title)
+        })
+    );
+}).catch((error) => {
     console.error(error);
     process.exitCode = 1;
 });
@@ -46,19 +43,17 @@ The first evaluated task is doing, so the first filtered page is empty. The iter
 
 <!-- example: examples/docs/pagination.ts -->
 ```ts
-import {withTasks} from './task-setup';
+import { withTasks } from './task-setup';
 
-withTasks(async ({tasks}) => {
+withTasks(async ({ tasks }) => {
     const pageSizes: number[] = [];
     const titles: string[] = [];
-    for await (const page of tasks.query({projectId: 'project-1'})
-        .where('status').eq('todo')
-        .pages({limit: 1})) {
+    for await (const page of tasks.query({ projectId: 'project-1' }).where('status').eq('todo').pages({ limit: 1 })) {
         pageSizes.push(page.items.length);
-        titles.push(...page.items.map(task => task.title));
+        titles.push(...page.items.map((task) => task.title));
     }
-    console.log(JSON.stringify({pageSizes, titles}));
-}).catch(error => {
+    console.log(JSON.stringify({ pageSizes, titles }));
+}).catch((error) => {
     console.error(error);
     process.exitCode = 1;
 });
@@ -79,23 +74,30 @@ Each call creates a fresh conditional update. The first applies; the second does
 
 <!-- example: examples/docs/conditions.ts -->
 ```ts
-import {withTasks} from './task-setup';
+import { withTasks } from './task-setup';
 
-withTasks(async ({tasks, key}) => {
-    const complete = () => tasks.update(key)
-        .set('status').eq('done')
-        .where('status').eq('doing')
-        .onConditionFailure().returningAllOld()
-        .toResult();
+withTasks(async ({ tasks, key }) => {
+    const complete = () =>
+        tasks
+            .update(key)
+            .set('status')
+            .eq('done')
+            .where('status')
+            .eq('doing')
+            .onConditionFailure()
+            .returningAllOld()
+            .toResult();
 
     const first = await complete();
     const second = await complete();
-    console.log(JSON.stringify({
-        firstApplied: first.applied,
-        secondApplied: second.applied,
-        previousStatus: second.applied ? null : second.previous?.status
-    }));
-}).catch(error => {
+    console.log(
+        JSON.stringify({
+            firstApplied: first.applied,
+            secondApplied: second.applied,
+            previousStatus: second.applied ? null : second.previous?.status
+        })
+    );
+}).catch((error) => {
     console.error(error);
     process.exitCode = 1;
 });
@@ -116,22 +118,20 @@ Both conditions must hold. If either fails, neither write is applied. Distinct t
 
 <!-- example: examples/docs/transactions.ts -->
 ```ts
-import {typedTransaction} from '@fluentful/orm';
-import {withTasks} from './task-setup';
+import { typedTransaction } from '@fluentful/orm';
+import { withTasks } from './task-setup';
 
-withTasks(async ({tasks, tasksTable, dynamoDB, key}) => {
-    const secondKey = {...key, taskId: 'task-2'};
+withTasks(async ({ tasks, tasksTable, dynamoDB, key }) => {
+    const secondKey = { ...key, taskId: 'task-2' };
     await typedTransaction(dynamoDB)
-        .add(tasksTable, table => table.update(key)
-            .set('status').eq('done').where('status').eq('doing'))
-        .add(tasksTable, table => table.update(secondKey)
-            .set('status').eq('doing').where('status').eq('todo'))
+        .add(tasksTable, (table) => table.update(key).set('status').eq('done').where('status').eq('doing'))
+        .add(tasksTable, (table) => table.update(secondKey).set('status').eq('doing').where('status').eq('todo'))
         .toPromise();
 
     const first = await tasks.get(key).toPromise();
     const second = await tasks.get(secondKey).toPromise();
-    console.log(JSON.stringify({firstStatus: first?.status, secondStatus: second?.status}));
-}).catch(error => {
+    console.log(JSON.stringify({ firstStatus: first?.status, secondStatus: second?.status }));
+}).catch((error) => {
     console.error(error);
     process.exitCode = 1;
 });
@@ -152,20 +152,22 @@ Memory completes these writes. In a service failure, use resumable only for expl
 
 <!-- example: examples/docs/batches.ts -->
 ```ts
-import {withTasks} from './task-setup';
+import { withTasks } from './task-setup';
 
-withTasks(async ({tasks, newTasks}) => {
-    const outcome = await tasks.createBatchResult(newTasks, {concurrency: 2});
-    console.log(JSON.stringify({
-        completed: outcome.completed.length,
-        resumable: outcome.resumable.length,
-        unknown: outcome.unknown.length
-    }));
+withTasks(async ({ tasks, newTasks }) => {
+    const outcome = await tasks.createBatchResult(newTasks, { concurrency: 2 });
+    console.log(
+        JSON.stringify({
+            completed: outcome.completed.length,
+            resumable: outcome.resumable.length,
+            unknown: outcome.unknown.length
+        })
+    );
     // Reconcile unknown writes before retrying; only resumable is safe to resubmit.
     if (outcome.errors.length > 0) {
         throw outcome.errors[0];
     }
-}).catch(error => {
+}).catch((error) => {
     console.error(error);
     process.exitCode = 1;
 });

@@ -1,10 +1,10 @@
-import {ExecutionBinding} from './execution-options';
-import type {ExecutionOptions} from './types';
-import {TransactWriteItemsCommand} from '@aws-sdk/client-dynamodb';
-import type {DynamoDBClient, TransactWriteItem, TransactWriteItemsCommandOutput} from '@aws-sdk/client-dynamodb';
-import type {QueryBuilder} from './query-builder';
-import type {ReturnConsumedCapacity} from './types';
-import {ValueUtils} from './value-utils';
+import { ExecutionBinding } from './execution-options';
+import type { ExecutionOptions } from './types';
+import { TransactWriteItemsCommand } from '@aws-sdk/client-dynamodb';
+import type { DynamoDBClient, TransactWriteItem, TransactWriteItemsCommandOutput } from '@aws-sdk/client-dynamodb';
+import type { QueryBuilder } from './query-builder';
+import type { ReturnConsumedCapacity } from './types';
+import { ValueUtils } from './value-utils';
 
 type QueryLogger = null | ((message: any) => void);
 
@@ -103,18 +103,21 @@ export class TransactionWriteBuilder {
             TransactItems: this.items,
             ClientRequestToken: this.requestToken
         };
-        this._logger && this._logger({method: 'transactWriteItems', query: JSON.stringify(input)});
-        this.executed = Promise.resolve().then(() => {
-            this.execution.signal?.throwIfAborted();
-            return this.dynamoDB.send(new TransactWriteItemsCommand(input), {abortSignal: this.execution.signal});
-        }).then((result) => {
-            this._logger && this._logger({
-                method: 'transactWriteItems',
-                result: {count: this.items.length},
-                capacity: result.ConsumedCapacity
+        this._logger && this._logger({ method: 'transactWriteItems', query: JSON.stringify(input) });
+        this.executed = Promise.resolve()
+            .then(() => {
+                this.execution.signal?.throwIfAborted();
+                return this.dynamoDB.send(new TransactWriteItemsCommand(input), { abortSignal: this.execution.signal });
+            })
+            .then((result) => {
+                this._logger &&
+                    this._logger({
+                        method: 'transactWriteItems',
+                        result: { count: this.items.length },
+                        capacity: result.ConsumedCapacity
+                    });
+                return result;
             });
-            return result;
-        });
         return this.executed;
     }
 }

@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import {describe, test} from 'node:test';
-import {ValueUtils} from '../src/value-utils';
+import { describe, test } from 'node:test';
+import { ValueUtils } from '../src/value-utils';
 
 describe('query - ValueUtils', () => {
     test('clones nested values, maps, sets, binary data, and cycles', () => {
         const document: any = {
-            map: new Map([['record', {values: new Set(['one', 'two'])}]]),
+            map: new Map([['record', { values: new Set(['one', 'two']) }]]),
             binary: new Uint8Array([1, 2, 3])
         };
         document.self = document;
@@ -47,7 +47,7 @@ describe('query - ValueUtils', () => {
     });
 
     test('materialises accessor values and preserves enumerable array metadata', () => {
-        const state = {count: 1};
+        const state = { count: 1 };
         const source = Object.assign([1], {
             get state() {
                 return state;
@@ -63,14 +63,26 @@ describe('query - ValueUtils', () => {
     });
 
     test('compares supported values with strict deep semantics', () => {
-        assert.equal(ValueUtils.equals({a: [1, {b: 2}], c: true}, {c: true, a: [1, {b: 2}]}), true);
-        assert.equal(ValueUtils.equals(new Set([{id: 1}, {id: 2}]), new Set([{id: 2}, {id: 1}])), true);
-        assert.equal(ValueUtils.equals(new Map([['first', {value: 1}], ['second', {value: 2}]]), new Map([['second', {value: 2}], ['first', {value: 1}]])), true);
+        assert.equal(ValueUtils.equals({ a: [1, { b: 2 }], c: true }, { c: true, a: [1, { b: 2 }] }), true);
+        assert.equal(ValueUtils.equals(new Set([{ id: 1 }, { id: 2 }]), new Set([{ id: 2 }, { id: 1 }])), true);
+        assert.equal(
+            ValueUtils.equals(
+                new Map([
+                    ['first', { value: 1 }],
+                    ['second', { value: 2 }]
+                ]),
+                new Map([
+                    ['second', { value: 2 }],
+                    ['first', { value: 1 }]
+                ])
+            ),
+            true
+        );
         assert.equal(ValueUtils.equals(new Uint8Array([1, 2]), new Uint8Array([1, 2])), true);
         assert.equal(ValueUtils.equals(NaN, NaN), true);
         assert.equal(ValueUtils.equals(0, -0), false);
         assert.equal(ValueUtils.equals(new Set([1]), new Set([2])), false);
-        assert.equal(ValueUtils.equals([1], {0: 1, length: 1}), false);
+        assert.equal(ValueUtils.equals([1], { 0: 1, length: 1 }), false);
 
         const left: any = {};
         const right: any = {};
@@ -86,9 +98,9 @@ describe('query - ValueUtils', () => {
     });
 
     test('compares shared references symmetrically without requiring identical graph sharing', () => {
-        const shared = {value: 1};
-        const left = {first: shared, second: shared};
-        const right = {first: {value: 1}, second: {value: 1}};
+        const shared = { value: 1 };
+        const left = { first: shared, second: shared };
+        const right = { first: { value: 1 }, second: { value: 1 } };
 
         assert.equal(ValueUtils.equals(left, right), true);
         assert.equal(ValueUtils.equals(right, left), true);
@@ -96,24 +108,27 @@ describe('query - ValueUtils', () => {
 
     test('distinguishes built-in values and enumerable metadata', () => {
         assert.equal(ValueUtils.equals(new Number(1), new Number(2)), false);
-        assert.equal(ValueUtils.equals(
-            new DataView(new Uint8Array([1]).buffer),
-            new DataView(new Uint8Array([2]).buffer)
-        ), false);
+        assert.equal(
+            ValueUtils.equals(new DataView(new Uint8Array([1]).buffer), new DataView(new Uint8Array([2]).buffer)),
+            false
+        );
         assert.equal(ValueUtils.equals(new Error('first'), new Error('second')), false);
-        assert.equal(ValueUtils.equals(
-            Object.assign([1], {label: 'first'}),
-            Object.assign([1], {label: 'second'})
-        ), false);
-        assert.equal(ValueUtils.equals(
-            Object.assign(new Set([1]), {label: 'first'}),
-            Object.assign(new Set([1]), {label: 'second'})
-        ), false);
+        assert.equal(
+            ValueUtils.equals(Object.assign([1], { label: 'first' }), Object.assign([1], { label: 'second' })),
+            false
+        );
+        assert.equal(
+            ValueUtils.equals(
+                Object.assign(new Set([1]), { label: 'first' }),
+                Object.assign(new Set([1]), { label: 'second' })
+            ),
+            false
+        );
     });
 
     test('diff is the inverse of equals', () => {
-        const value = {items: new Set(['one', 'two'])};
+        const value = { items: new Set(['one', 'two']) };
         assert.equal(ValueUtils.diff(value, ValueUtils.clone(value)), false);
-        assert.equal(ValueUtils.diff(value, {items: new Set(['one'])}), true);
+        assert.equal(ValueUtils.diff(value, { items: new Set(['one']) }), true);
     });
 });

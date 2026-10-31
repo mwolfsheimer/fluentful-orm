@@ -1,4 +1,4 @@
-import type {ExecutionOptions} from './types';
+import type { ExecutionOptions } from './types';
 
 export class ExecutionBinding {
     private bound = false;
@@ -8,6 +8,7 @@ export class ExecutionBinding {
         if (this.bound && options.signal !== undefined && options.signal !== this.signal) {
             throw new Error('Execution options cannot change after execution starts');
         }
+
         if (!this.bound) {
             this.signal = options.signal;
             this.bound = true;
@@ -17,7 +18,9 @@ export class ExecutionBinding {
 
 export function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
     return new Promise((resolve, reject) => {
+        // Check inside the executor so an already-aborted signal rejects the promise.
         signal?.throwIfAborted();
+
         const onAbort = () => {
             clearTimeout(timer);
             signal?.removeEventListener('abort', onAbort);
@@ -27,6 +30,8 @@ export function abortableDelay(milliseconds: number, signal?: AbortSignal): Prom
             signal?.removeEventListener('abort', onAbort);
             resolve();
         }, milliseconds);
-        signal?.addEventListener('abort', onAbort, {once: true});
+
+        // Both completion paths remove the listener to avoid accumulating it across retries.
+        signal?.addEventListener('abort', onAbort, { once: true });
     });
 }

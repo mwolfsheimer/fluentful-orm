@@ -1,13 +1,22 @@
-import type {ConsumedCapacity, ItemCollectionMetrics} from '@aws-sdk/client-dynamodb';
+import type { ConsumedCapacity, ItemCollectionMetrics } from '@aws-sdk/client-dynamodb';
 
-import type {SetOperand} from './update-expression';
-import type {AttributePath} from './document-path';
-import type {PredicateComparison, PredicateGroups} from './predicate';
+import type { SetOperand } from './update-expression';
+import type { AttributePath } from './document-path';
+import type { PredicateComparison, PredicateGroups } from './predicate';
 
 type Binary = Uint8Array;
 
-export type SerialisedItem<T, A> = { L: SerialisedItem<T, any>[] } | { SS: T } | { M: A } | { NS: string[] } | { NULL: boolean } | { S: T } | { N: string } | { BOOL: T } | null
-export type SerialisedMap<T> = { [key: string]: SerialisedItem<T, any> }
+export type SerialisedItem<T, A> =
+    | { L: SerialisedItem<T, any>[] }
+    | { SS: T }
+    | { M: A }
+    | { NS: string[] }
+    | { NULL: boolean }
+    | { S: T }
+    | { N: string }
+    | { BOOL: T }
+    | null;
+export type SerialisedMap<T> = { [key: string]: SerialisedItem<T, any> };
 export type GenericDocument<T> = { [key: string]: T };
 export type GetDocumentSelector = GenericDocument<string | number | Uint8Array>;
 export type GetStringSelector = { S: string };
@@ -20,7 +29,7 @@ export type GetBinarySelector = { B: Uint8Array };
 export type GetBinarySetSelector = { BS: Uint8Array[] };
 export type GetMapSelector = { M: GenericDocument<GetSelector> };
 export type GetSelector =
-    GetStringSelector
+    | GetStringSelector
     | GetNumberSelector
     | GetBoolSelector
     | GetNullSelector
@@ -110,7 +119,7 @@ export type CreateDocumentWith = GenericDocument<any>;
 export type DeleteDocumentWith = GenericDocument<any>;
 export type GetDocumentWith = GenericDocument<any>;
 /** Promise returned by an untyped terminal operation. */
-export type PromiseFinal<T> = Promise<T>
+export type PromiseFinal<T> = Promise<T>;
 /** Successful update payload mode. */
 export type UpdateReturnMode = 'all-new' | 'all-old' | 'updated-new' | 'updated-old' | 'none';
 /** Successful delete payload mode. */
@@ -118,8 +127,7 @@ export type DeleteReturnMode = 'all-old' | 'none';
 
 /** Result of a conditional write, including the previous record on failure when requested. */
 export type ConditionalWriteResult<T, TPrevious = T> =
-    | {applied: true; value: T}
-    | {applied: false; previous: TPrevious | null};
+    { applied: true; value: T } | { applied: false; previous: TPrevious | null };
 
 /** Terminal operation shared by conditional create, update, and delete chains. */
 export interface ConditionalWriteFinal {
@@ -148,7 +156,8 @@ export interface ConditionFailureReturnOptions<T> {
 }
 
 /** Fluent result for an untyped create operation. */
-export interface CreateQuery extends ConditionFailureReturnQuery<CreateQuery>, ConditionalWriteFinal, PredicateGroups<CreateQuery> {
+export interface CreateQuery
+    extends ConditionFailureReturnQuery<CreateQuery>, ConditionalWriteFinal, PredicateGroups<CreateQuery> {
     /** Adds a condition to the new item before it is created. */
     where(key: AttributePath): CreateNotWhereQuery;
     /** Returns the item replaced by a successful put, if any. */
@@ -170,7 +179,8 @@ export interface DeleteWhereQuery extends PredicateComparison<DeleteQuery> {}
 export interface DeleteNotWhereQuery extends DeleteWhereQuery {}
 
 /** Fluent result for an untyped delete operation. */
-export interface DeleteQuery extends ConditionFailureReturnQuery<DeleteQuery>, ConditionalWriteFinal, PredicateGroups<DeleteQuery> {
+export interface DeleteQuery
+    extends ConditionFailureReturnQuery<DeleteQuery>, ConditionalWriteFinal, PredicateGroups<DeleteQuery> {
     /** Adds a condition to the item before it is deleted. */
     where(key: AttributePath): DeleteNotWhereQuery;
     /** Returns the deleted item, when present, in the successful result. */
@@ -194,7 +204,8 @@ export interface ConditionCheckWhereQuery extends PredicateComparison<ConditionC
 export interface ConditionCheckNotWhereQuery extends ConditionCheckWhereQuery {}
 
 /** Fluent result for an untyped DynamoDB condition check. */
-export interface ConditionCheckQuery extends ConditionFailureReturnQuery<ConditionCheckQuery>, PredicateGroups<ConditionCheckQuery> {
+export interface ConditionCheckQuery
+    extends ConditionFailureReturnQuery<ConditionCheckQuery>, PredicateGroups<ConditionCheckQuery> {
     /** Adds a condition that must hold for the transaction item. */
     where(key: AttributePath): ConditionCheckNotWhereQuery;
     /** Executes the condition check. */
@@ -356,7 +367,8 @@ export interface UpdateQuery {
 }
 
 /** Fluent continuation for an update after an update expression is selected. */
-export interface UpdateSubQuery extends ConditionFailureReturnQuery<UpdateSubQuery>, ConditionalWriteFinal, PredicateGroups<UpdateSubQuery> {
+export interface UpdateSubQuery
+    extends ConditionFailureReturnQuery<UpdateSubQuery>, ConditionalWriteFinal, PredicateGroups<UpdateSubQuery> {
     /** Adds a condition to the item before it is updated. */
     where(key: AttributePath): UpdateNotWhereQuery;
     /** Returns the updated item in the successful result. */
@@ -421,5 +433,5 @@ export enum UpdateExpressionType {
     DELETE = 'DELETE'
 }
 
-export type StreamItem = ({ s: (value: any) => any, f: (error: any) => any, work: () => Promise<any> });
+export type StreamItem = { s: (value: any) => any; f: (error: any) => any; work: () => Promise<any> };
 export type Stream = StreamItem[];
